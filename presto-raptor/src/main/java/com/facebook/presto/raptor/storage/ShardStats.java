@@ -16,7 +16,6 @@ package com.facebook.presto.raptor.storage;
 import com.facebook.presto.orc.OrcPredicate;
 import com.facebook.presto.orc.OrcReader;
 import com.facebook.presto.orc.OrcRecordReader;
-import com.facebook.presto.orc.memory.AggregatedMemoryContext;
 import com.facebook.presto.raptor.metadata.ColumnStats;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
@@ -24,6 +23,7 @@ import com.facebook.presto.spi.type.BigintType;
 import com.facebook.presto.spi.type.BooleanType;
 import com.facebook.presto.spi.type.DateType;
 import com.facebook.presto.spi.type.DoubleType;
+import com.facebook.presto.spi.type.TimeType;
 import com.facebook.presto.spi.type.TimestampType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.VarcharType;
@@ -34,6 +34,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
+import static com.facebook.presto.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
+import static com.facebook.presto.orc.OrcReader.INITIAL_BATCH_SIZE;
 import static com.facebook.presto.raptor.RaptorErrorCode.RAPTOR_ERROR;
 import static java.lang.Double.isInfinite;
 import static java.lang.Double.isNaN;
@@ -57,7 +59,7 @@ public final class ShardStats
     }
 
     public static Optional<ColumnStats> computeColumnStats(OrcReader orcReader, long columnId, Type type)
-        throws IOException
+            throws IOException
     {
         return Optional.ofNullable(doComputeColumnStats(orcReader, columnId, type));
     }
@@ -66,13 +68,14 @@ public final class ShardStats
             throws IOException
     {
         int columnIndex = columnIndex(orcReader.getColumnNames(), columnId);
-        OrcRecordReader reader = orcReader.createRecordReader(ImmutableMap.of(columnIndex, type), OrcPredicate.TRUE, UTC, new AggregatedMemoryContext());
+        OrcRecordReader reader = orcReader.createRecordReader(ImmutableMap.of(columnIndex, type), OrcPredicate.TRUE, UTC, newSimpleAggregatedMemoryContext(), INITIAL_BATCH_SIZE);
 
         if (type.equals(BooleanType.BOOLEAN)) {
             return indexBoolean(type, reader, columnIndex, columnId);
         }
         if (type.equals(BigintType.BIGINT) ||
                 type.equals(DateType.DATE) ||
+                type.equals(TimeType.TIME) ||
                 type.equals(TimestampType.TIMESTAMP)) {
             return indexLong(type, reader, columnIndex, columnId);
         }

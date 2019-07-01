@@ -13,15 +13,10 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.Session;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.SymbolAllocator;
-import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.iterative.Pattern;
-import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.planner.plan.PlanNode;
-import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Streams;
@@ -30,54 +25,35 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
-import static com.facebook.presto.sql.planner.iterative.rule.Util.pruneInputs;
 import static com.facebook.presto.sql.planner.iterative.rule.Util.restrictOutputs;
+import static com.facebook.presto.sql.planner.plan.Patterns.semiJoin;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 public class PruneSemiJoinColumns
-        implements Rule
+        extends ProjectOffPushDownRule<SemiJoinNode>
 {
-    private static final Pattern PATTERN = Pattern.node(ProjectNode.class);
-
-    @Override
-    public Pattern getPattern()
+    public PruneSemiJoinColumns()
     {
-        return PATTERN;
+        super(semiJoin());
     }
 
     @Override
-    public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, SemiJoinNode semiJoinNode, Set<VariableReferenceExpression> referencedOutputs)
     {
-        ProjectNode parent = (ProjectNode) node;
-
-        PlanNode child = lookup.resolve(parent.getSource());
-        if (!(child instanceof SemiJoinNode)) {
-            return Optional.empty();
+        if (!referencedOutputs.contains(semiJoinNode.getSemiJoinOutput())) {
+            return Optional.of(semiJoinNode.getSource());
         }
 
-        SemiJoinNode semiJoinNode = (SemiJoinNode) child;
-
-        Optional<Set<Symbol>> prunedOutputs = pruneInputs(child.getOutputSymbols(), parent.getAssignments().getExpressions());
-        if (!prunedOutputs.isPresent()) {
-            return Optional.empty();
-        }
-
-        if (!prunedOutputs.get().contains(semiJoinNode.getSemiJoinOutput())) {
-            return Optional.of(
-                    parent.replaceChildren(ImmutableList.of(semiJoinNode.getSource())));
-        }
-
-        Set<Symbol> requiredSourceInputs = Streams.concat(
-                prunedOutputs.get().stream()
-                        .filter(symbol -> !symbol.equals(semiJoinNode.getSemiJoinOutput())),
-                Stream.of(semiJoinNode.getSourceJoinSymbol()),
-                semiJoinNode.getSourceHashSymbol().map(Stream::of).orElse(Stream.empty()))
+        Set<VariableReferenceExpression> requiredSourceInputs = Streams.concat(
+                referencedOutputs.stream()
+                        .filter(variable -> !variable.equals(semiJoinNode.getSemiJoinOutput())),
+                Stream.of(semiJoinNode.getSourceJoinVariable()),
+                semiJoinNode.getSourceHashVariable().map(Stream::of).orElse(Stream.empty()))
                 .collect(toImmutableSet());
 
         return restrictOutputs(idAllocator, semiJoinNode.getSource(), requiredSourceInputs)
                 .map(newSource ->
-                        parent.replaceChildren(ImmutableList.of(
-                                semiJoinNode.replaceChildren(ImmutableList.of(
-                                        newSource, semiJoinNode.getFilteringSource())))));
+                        semiJoinNode.replaceChildren(ImmutableList.of(
+                                newSource, semiJoinNode.getFilteringSource())));
     }
 }

@@ -49,17 +49,23 @@ public final class LikeFunctions
                     INEFFECTIVE_META_CHAR,          /* anytime '*' */
                     INEFFECTIVE_META_CHAR,          /* zero or one time '?' */
                     INEFFECTIVE_META_CHAR,          /* one or more time '+' */
-                    INEFFECTIVE_META_CHAR           /* anychar anytime */
-            )
-    );
+                    INEFFECTIVE_META_CHAR));        /* anychar anytime */
 
     private LikeFunctions() {}
+
+    @ScalarFunction(value = "like", hidden = true)
+    @LiteralParameters("x")
+    @SqlType(StandardTypes.BOOLEAN)
+    public static boolean likeChar(@LiteralParameter("x") Long x, @SqlType("char(x)") Slice value, @SqlType(LikePatternType.NAME) Regex pattern)
+    {
+        return likeVarchar(padSpaces(value, x.intValue()), pattern);
+    }
 
     // TODO: this should not be callable from SQL
     @ScalarFunction(value = "like", hidden = true)
     @LiteralParameters("x")
     @SqlType(StandardTypes.BOOLEAN)
-    public static boolean like(@SqlType("varchar(x)") Slice value, @SqlType(LikePatternType.NAME) Regex pattern)
+    public static boolean likeVarchar(@SqlType("varchar(x)") Slice value, @SqlType(LikePatternType.NAME) Regex pattern)
     {
         // Joni can infinite loop with UTF8Encoding when invalid UTF-8 is encountered.
         // NonStrictUTF8Encoding must be used to avoid this issue.
@@ -88,7 +94,7 @@ public final class LikeFunctions
         return likePattern(pattern.toStringUtf8(), '0', false);
     }
 
-    @ScalarFunction
+    @ScalarFunction(hidden = true)
     @LiteralParameters({"x", "y"})
     @SqlType(LikePatternType.NAME)
     public static Regex likePattern(@SqlType("varchar(x)") Slice pattern, @SqlType("varchar(y)") Slice escape)

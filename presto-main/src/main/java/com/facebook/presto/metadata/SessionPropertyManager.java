@@ -15,10 +15,9 @@ package com.facebook.presto.metadata;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.SystemSessionProperties;
-import com.facebook.presto.connector.ConnectorId;
+import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.session.PropertyMetadata;
 import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.BigintType;
@@ -178,7 +177,7 @@ public final class SessionPropertyManager
     public <T> T decodeCatalogPropertyValue(ConnectorId connectorId, String catalogName, String propertyName, @Nullable String propertyValue, Class<T> type)
     {
         String fullPropertyName = catalogName + "." + propertyName;
-        PropertyMetadata<?> property = getConnectorSessionPropertyMetadata(connectorId,  propertyName)
+        PropertyMetadata<?> property = getConnectorSessionPropertyMetadata(connectorId, propertyName)
                 .orElseThrow(() -> new PrestoException(INVALID_SESSION_PROPERTY, "Unknown session property " + fullPropertyName));
 
         return decodePropertyValue(fullPropertyName, propertyValue, type, property);
@@ -230,7 +229,7 @@ public final class SessionPropertyManager
         Object value = evaluateConstantExpression(rewritten, expectedType, metadata, session, parameters);
 
         // convert to object value type of SQL type
-        BlockBuilder blockBuilder = expectedType.createBlockBuilder(new BlockBuilderStatus(), 1);
+        BlockBuilder blockBuilder = expectedType.createBlockBuilder(null, 1);
         writeNativeValue(expectedType, blockBuilder, value);
         Object objectValue = expectedType.getObjectValue(session.toConnectorSession(), blockBuilder, 0);
 

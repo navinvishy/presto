@@ -13,7 +13,7 @@
  */
 package com.facebook.presto.execution;
 
-import com.facebook.presto.connector.ConnectorId;
+import com.facebook.presto.spi.ConnectorId;
 import io.airlift.json.JsonCodec;
 import org.testng.annotations.Test;
 
@@ -25,7 +25,6 @@ public class TestOutput
 
     @Test
     public void testRoundTrip()
-            throws Exception
     {
         Output expected = new Output(new ConnectorId("connectorId"), "schema", "table");
 

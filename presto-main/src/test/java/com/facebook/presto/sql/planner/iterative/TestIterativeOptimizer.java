@@ -14,13 +14,13 @@
 package com.facebook.presto.sql.planner.iterative;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.execution.warnings.WarningCollector;
+import com.facebook.presto.matching.Captures;
+import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.StatsRecorder;
-import com.facebook.presto.sql.planner.SymbolAllocator;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.sql.planner.RuleStatsRecorder;
 import com.facebook.presto.sql.planner.optimizations.PlanOptimizer;
-import com.facebook.presto.sql.planner.plan.Assignments;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.facebook.presto.testing.LocalQueryRunner;
 import com.facebook.presto.tpch.TpchConnectorFactory;
@@ -31,9 +31,9 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
-
 import static com.facebook.presto.spi.StandardErrorCode.OPTIMIZER_TIMEOUT;
+import static com.facebook.presto.sql.planner.plan.AssignmentUtils.identityAssignmentsAsSymbolReferences;
+import static com.facebook.presto.sql.planner.plan.Patterns.project;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.fail;
@@ -64,17 +64,22 @@ public class TestIterativeOptimizer
     {
         if (queryRunner != null) {
             queryRunner.close();
+            queryRunner = null;
         }
     }
 
     @Test(timeOut = 1000)
     public void optimizerTimeoutsOnNonConvergingPlan()
     {
-        PlanOptimizer optimizer = new IterativeOptimizer(new StatsRecorder(), ImmutableSet.of(new NonConvergingRule()));
+        PlanOptimizer optimizer = new IterativeOptimizer(
+                new RuleStatsRecorder(),
+                queryRunner.getStatsCalculator(),
+                queryRunner.getCostCalculator(),
+                ImmutableSet.of(new NonConvergingRule()));
 
         try {
             queryRunner.inTransaction(transactionSession -> {
-                queryRunner.createPlan(transactionSession, "SELECT * FROM nation", ImmutableList.of(optimizer));
+                queryRunner.createPlan(transactionSession, "SELECT * FROM nation", ImmutableList.of(optimizer), WarningCollector.NOOP);
                 fail("The optimizer should not converge");
                 return null;
             });
@@ -83,29 +88,32 @@ public class TestIterativeOptimizer
             assertEquals(ex.getErrorCode(), OPTIMIZER_TIMEOUT.toErrorCode());
         }
     }
+
     private static class NonConvergingRule
-            implements Rule
+            implements Rule<ProjectNode>
     {
+        @Override
+        public Pattern<ProjectNode> getPattern()
+        {
+            return project();
+        }
+
         // This rewrite will produce an identity projection node unless one exists.
         // In that case, it will be removed.
         // Thanks to that approach, it never converges and always produces different node.
         @Override
-        public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+        public Result apply(ProjectNode project, Captures captures, Context context)
         {
-            if (node instanceof ProjectNode) {
-                ProjectNode project = (ProjectNode) node;
-                if (isIdentityProjection(project)) {
-                    return Optional.of(project.getSource());
-                }
+            if (isIdentityProjection(project)) {
+                return Result.ofPlanNode(project.getSource());
             }
-
-            PlanNode projectNode = new ProjectNode(idAllocator.getNextId(), node, Assignments.identity(node.getOutputSymbols()));
-            return Optional.of(projectNode);
+            PlanNode projectNode = new ProjectNode(context.getIdAllocator().getNextId(), project, identityAssignmentsAsSymbolReferences(project.getOutputVariables()));
+            return Result.ofPlanNode(projectNode);
         }
 
         private static boolean isIdentityProjection(ProjectNode project)
         {
-            return ImmutableSet.copyOf(project.getOutputSymbols()).equals(ImmutableSet.copyOf(project.getSource().getOutputSymbols()));
+            return ImmutableSet.copyOf(project.getOutputVariables()).equals(ImmutableSet.copyOf(project.getSource().getOutputVariables()));
         }
     }
 }

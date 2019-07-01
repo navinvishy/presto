@@ -14,7 +14,9 @@
 package com.facebook.presto.jdbc;
 
 import com.facebook.presto.client.ClientException;
+import com.facebook.presto.client.QueryStatusInfo;
 import com.facebook.presto.client.StatementClient;
+import com.facebook.presto.spi.security.SelectedRole;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
 
@@ -45,8 +47,11 @@ public class PrestoStatement
     private final AtomicBoolean escapeProcessing = new AtomicBoolean(true);
     private final AtomicBoolean closeOnCompletion = new AtomicBoolean();
     private final AtomicReference<PrestoConnection> connection;
-    private final AtomicReference<ResultSet> currentResult = new AtomicReference<>();
+    private final AtomicReference<StatementClient> executingClient = new AtomicReference<>();
+    private final AtomicReference<PrestoResultSet> currentResult = new AtomicReference<>();
+    private final AtomicReference<Optional<WarningsManager>> currentWarningsManager = new AtomicReference<>(Optional.empty());
     private final AtomicLong currentUpdateCount = new AtomicLong(-1);
+    private final AtomicReference<String> currentUpdateType = new AtomicReference<>();
     private final AtomicReference<Optional<Consumer<QueryStats>>> progressCallback = new AtomicReference<>(Optional.empty());
     private final Consumer<QueryStats> progressConsumer = value -> progressCallback.get().ifPresent(callback -> callback.accept(value));
 
@@ -79,9 +84,8 @@ public class PrestoStatement
     public void close()
             throws SQLException
     {
-        if (connection.getAndSet(null) != null) {
-            // TODO
-        }
+        connection.set(null);
+        closeResultSet();
     }
 
     @Override
@@ -171,7 +175,14 @@ public class PrestoStatement
     public void cancel()
             throws SQLException
     {
-        throw new SQLFeatureNotSupportedException("cancel");
+        checkOpen();
+
+        StatementClient client = executingClient.get();
+        if (client != null) {
+            client.close();
+        }
+
+        closeResultSet();
     }
 
     @Override
@@ -179,7 +190,7 @@ public class PrestoStatement
             throws SQLException
     {
         checkOpen();
-        return null;
+        return currentWarningsManager.get().map(WarningsManager::getWarnings).orElse(null);
     }
 
     @Override
@@ -187,6 +198,7 @@ public class PrestoStatement
             throws SQLException
     {
         checkOpen();
+        currentWarningsManager.get().ifPresent(WarningsManager::clearWarnings);
     }
 
     @Override
@@ -210,22 +222,39 @@ public class PrestoStatement
     public boolean execute(String sql)
             throws SQLException
     {
+        if (connection().shouldStartTransaction()) {
+            internalExecute(connection().getStartTransactionSql());
+        }
+        return internalExecute(sql);
+    }
+
+    final boolean internalExecute(String sql)
+            throws SQLException
+    {
         clearCurrentResults();
         checkOpen();
 
         StatementClient client = null;
-        ResultSet resultSet = null;
+        PrestoResultSet resultSet = null;
         try {
             client = connection().startQuery(sql, getStatementSessionProperties());
-            if (client.isFailed()) {
-                throw resultsException(client.finalResults());
+            if (client.isFinished()) {
+                QueryStatusInfo finalStatusInfo = client.finalStatusInfo();
+                if (finalStatusInfo.getError() != null) {
+                    throw resultsException(finalStatusInfo);
+                }
+            }
+            executingClient.set(client);
+            WarningsManager warningsManager = new WarningsManager();
+            currentWarningsManager.set(Optional.of(warningsManager));
+            resultSet = new PrestoResultSet(client, maxRows.get(), progressConsumer, warningsManager);
+
+            for (Map.Entry<String, SelectedRole> entry : client.getSetRoles().entrySet()) {
+                connection.get().setRole(entry.getKey(), entry.getValue());
             }
 
-            resultSet = new PrestoResultSet(client, maxRows.get(), progressConsumer);
-            checkSetOrResetSession(client);
-
             // check if this is a query
-            if (client.current().getUpdateType() == null) {
+            if (client.currentStatusInfo().getUpdateType() == null) {
                 currentResult.set(resultSet);
                 return true;
             }
@@ -235,9 +264,12 @@ public class PrestoStatement
                 // ignore rows
             }
 
-            Long updateCount = client.finalResults().getUpdateCount();
-            currentUpdateCount.set((updateCount != null) ? updateCount : 0);
+            connection().updateSession(client);
 
+            Long updateCount = client.finalStatusInfo().getUpdateCount();
+            currentUpdateCount.set((updateCount != null) ? updateCount : 0);
+            currentUpdateType.set(client.finalStatusInfo().getUpdateType());
+            warningsManager.addWarnings(client.finalStatusInfo().getWarnings());
             return false;
         }
         catch (ClientException e) {
@@ -247,6 +279,7 @@ public class PrestoStatement
             throw new SQLException("Error executing query", e);
         }
         finally {
+            executingClient.set(null);
             if (currentResult.get() == null) {
                 if (resultSet != null) {
                     resultSet.close();
@@ -262,6 +295,8 @@ public class PrestoStatement
     {
         currentResult.set(null);
         currentUpdateCount.set(-1);
+        currentUpdateType.set(null);
+        currentWarningsManager.set(Optional.empty());
     }
 
     @Override
@@ -291,9 +326,7 @@ public class PrestoStatement
     public boolean getMoreResults()
             throws SQLException
     {
-        checkOpen();
-        currentResult.get().close();
-        return false;
+        return getMoreResults(CLOSE_CURRENT_RESULT);
     }
 
     @Override
@@ -387,8 +420,11 @@ public class PrestoStatement
     {
         checkOpen();
 
+        currentUpdateCount.set(-1);
+        currentUpdateType.set(null);
+
         if (current == CLOSE_CURRENT_RESULT) {
-            currentResult.get().close();
+            closeResultSet();
             return false;
         }
 
@@ -550,13 +586,37 @@ public class PrestoStatement
         return iface.isInstance(this);
     }
 
-    private void checkOpen()
+    public String getUpdateType()
+            throws SQLException
+    {
+        checkOpen();
+        return currentUpdateType.get();
+    }
+
+    public void partialCancel()
+            throws SQLException
+    {
+        checkOpen();
+
+        StatementClient client = executingClient.get();
+        if (client != null) {
+            client.cancelLeafStage();
+        }
+        else {
+            PrestoResultSet resultSet = currentResult.get();
+            if (resultSet != null) {
+                resultSet.partialCancel();
+            }
+        }
+    }
+
+    protected final void checkOpen()
             throws SQLException
     {
         connection();
     }
 
-    private PrestoConnection connection()
+    protected final PrestoConnection connection()
             throws SQLException
     {
         PrestoConnection connection = this.connection.get();
@@ -569,20 +629,19 @@ public class PrestoStatement
         return connection;
     }
 
+    private void closeResultSet()
+            throws SQLException
+    {
+        ResultSet resultSet = currentResult.getAndSet(null);
+        if (resultSet != null) {
+            resultSet.close();
+        }
+    }
+
     private static boolean validFetchDirection(int direction)
     {
         return (direction == ResultSet.FETCH_FORWARD) ||
                 (direction == ResultSet.FETCH_REVERSE) ||
                 (direction == ResultSet.FETCH_UNKNOWN);
-    }
-
-    private static void checkSetOrResetSession(StatementClient client)
-            throws SQLException
-    {
-        if (!client.getSetSessionProperties().isEmpty() || !client.getResetSessionProperties().isEmpty()) {
-            throw new SQLFeatureNotSupportedException("" +
-                    "SET/RESET SESSION is not supported via JDBC. " +
-                    "Use the setSessionProperty() method on PrestoConnection.");
-        }
     }
 }

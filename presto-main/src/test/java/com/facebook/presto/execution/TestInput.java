@@ -13,7 +13,7 @@
  */
 package com.facebook.presto.execution;
 
-import com.facebook.presto.connector.ConnectorId;
+import com.facebook.presto.spi.ConnectorId;
 import com.google.common.collect.ImmutableList;
 import io.airlift.json.JsonCodec;
 import org.testng.annotations.Test;
@@ -28,7 +28,6 @@ public class TestInput
 
     @Test
     public void testRoundTrip()
-            throws Exception
     {
         Input expected = new Input(new ConnectorId("connectorId"), "schema", "table", Optional.empty(), ImmutableList.of(
                 new Column("column1", "string"),

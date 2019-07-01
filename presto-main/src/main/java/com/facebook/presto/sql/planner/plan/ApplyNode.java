@@ -13,11 +13,11 @@
  */
 package com.facebook.presto.sql.planner.plan;
 
-import com.facebook.presto.sql.planner.Symbol;
-import com.facebook.presto.sql.tree.ExistsPredicate;
-import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.InPredicate;
-import com.facebook.presto.sql.tree.QuantifiedComparisonExpression;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.sql.planner.optimizations.ApplyNodeUtil;
+import com.facebook.presto.sql.relational.OriginalExpressionUtils;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
@@ -31,15 +31,15 @@ import static java.util.Objects.requireNonNull;
 
 @Immutable
 public class ApplyNode
-        extends PlanNode
+        extends InternalPlanNode
 {
     private final PlanNode input;
     private final PlanNode subquery;
 
     /**
-     * Correlation symbols, returned from input (outer plan) used in subquery (inner plan)
+     * Correlation variables, returned from input (outer plan) used in subquery (inner plan)
      */
-    private final List<Symbol> correlation;
+    private final List<VariableReferenceExpression> correlation;
 
     /**
      * Expressions that use subquery symbols.
@@ -62,60 +62,67 @@ public class ApplyNode
      */
     private final Assignments subqueryAssignments;
 
+    /**
+     * This information is only used for sanity check.
+     */
+    private final String originSubqueryError;
+
     @JsonCreator
     public ApplyNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("input") PlanNode input,
             @JsonProperty("subquery") PlanNode subquery,
             @JsonProperty("subqueryAssignments") Assignments subqueryAssignments,
-            @JsonProperty("correlation") List<Symbol> correlation)
+            @JsonProperty("correlation") List<VariableReferenceExpression> correlation,
+            @JsonProperty("originSubqueryError") String originSubqueryError)
     {
         super(id);
         requireNonNull(input, "input is null");
         requireNonNull(subquery, "right is null");
         requireNonNull(subqueryAssignments, "assignments is null");
         requireNonNull(correlation, "correlation is null");
+        requireNonNull(originSubqueryError, "originSubqueryError is null");
 
-        checkArgument(input.getOutputSymbols().containsAll(correlation), "Input does not contain symbols from correlation");
+        checkArgument(input.getOutputVariables().containsAll(correlation), "Input does not contain symbols from correlation");
         checkArgument(
-                subqueryAssignments.getExpressions().stream().allMatch(ApplyNode::isSupportedSubqueryExpression),
+                subqueryAssignments.getExpressions().stream().map(OriginalExpressionUtils::castToExpression).allMatch(ApplyNodeUtil::isSupportedSubqueryExpression),
                 "Unexpected expression used for subquery expression");
 
         this.input = input;
         this.subquery = subquery;
         this.subqueryAssignments = subqueryAssignments;
         this.correlation = ImmutableList.copyOf(correlation);
+        this.originSubqueryError = originSubqueryError;
     }
 
-    private static boolean isSupportedSubqueryExpression(Expression expression)
-    {
-        return expression instanceof InPredicate ||
-                expression instanceof ExistsPredicate ||
-                expression instanceof QuantifiedComparisonExpression;
-    }
-
-    @JsonProperty("input")
+    @JsonProperty
     public PlanNode getInput()
     {
         return input;
     }
 
-    @JsonProperty("subquery")
+    @JsonProperty
     public PlanNode getSubquery()
     {
         return subquery;
     }
 
-    @JsonProperty("subqueryAssignments")
+    @JsonProperty
     public Assignments getSubqueryAssignments()
     {
         return subqueryAssignments;
     }
 
-    @JsonProperty("correlation")
-    public List<Symbol> getCorrelation()
+    @JsonProperty
+    public List<VariableReferenceExpression> getCorrelation()
     {
         return correlation;
+    }
+
+    @JsonProperty
+    public String getOriginSubqueryError()
+    {
+        return originSubqueryError;
     }
 
     @Override
@@ -125,17 +132,16 @@ public class ApplyNode
     }
 
     @Override
-    @JsonProperty("outputSymbols")
-    public List<Symbol> getOutputSymbols()
+    public List<VariableReferenceExpression> getOutputVariables()
     {
-        return ImmutableList.<Symbol>builder()
-                .addAll(input.getOutputSymbols())
+        return ImmutableList.<VariableReferenceExpression>builder()
+                .addAll(input.getOutputVariables())
                 .addAll(subqueryAssignments.getOutputs())
                 .build();
     }
 
     @Override
-    public <R, C> R accept(PlanVisitor<R, C> visitor, C context)
+    public <R, C> R accept(InternalPlanVisitor<R, C> visitor, C context)
     {
         return visitor.visitApply(this, context);
     }
@@ -144,6 +150,6 @@ public class ApplyNode
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
         checkArgument(newChildren.size() == 2, "expected newChildren to contain 2 nodes");
-        return new ApplyNode(getId(), newChildren.get(0), newChildren.get(1), subqueryAssignments, correlation);
+        return new ApplyNode(getId(), newChildren.get(0), newChildren.get(1), subqueryAssignments, correlation, originSubqueryError);
     }
 }

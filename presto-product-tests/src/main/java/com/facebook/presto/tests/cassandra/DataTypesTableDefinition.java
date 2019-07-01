@@ -17,14 +17,15 @@ import com.datastax.driver.core.utils.Bytes;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.teradata.tempto.fulfillment.table.jdbc.RelationalDataSource;
-import com.teradata.tempto.internal.fulfillment.table.cassandra.CassandraTableDefinition;
+import io.prestodb.tempto.fulfillment.table.jdbc.RelationalDataSource;
+import io.prestodb.tempto.internal.fulfillment.table.cassandra.CassandraTableDefinition;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.Inet4Address;
 import java.net.UnknownHostException;
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -41,10 +42,10 @@ public class DataTypesTableDefinition
     private static final String ALL_TYPES_TABLE_NAME = "all_types";
 
     private static final String ALL_TYPES_DDL =
-           "CREATE TABLE %NAME% (a ascii, b bigint, bl blob, bo boolean, d decimal, do double," +
-           "f float, fr frozen<set<int>>, i inet, integer int, l list<int>, m map<text,int>," +
-           "s set<int>, t text, ti timestamp, tu timeuuid, u uuid, v varchar, vari varint," +
-           "PRIMARY KEY (a))";
+            "CREATE TABLE %NAME% (a ascii, b bigint, bl blob, bo boolean, d decimal, do double," +
+                    "f float, fr frozen<set<int>>, i inet, integer int, l list<int>, m map<text,int>," +
+                    "s set<int>, t text, ti timestamp, tu timeuuid, u uuid, v varchar, vari varint," +
+                    "PRIMARY KEY (a))";
 
     static {
         RelationalDataSource dataSource = () -> {
@@ -54,7 +55,7 @@ public class DataTypesTableDefinition
                                 BigDecimal.ZERO, Double.MIN_VALUE, Float.MIN_VALUE, ImmutableSet.of(0),
                                 Inet4Address.getByName("0.0.0.0"), Integer.MIN_VALUE, ImmutableList.of(0),
                                 ImmutableMap.of("a", 0, "\0", Integer.MIN_VALUE), ImmutableSet.of(0),
-                                "\0", new Timestamp(0),
+                                "\0", Timestamp.valueOf(LocalDateTime.of(1970, 1, 1, 0, 0)),
                                 UUID.fromString("d2177dd0-eaa2-11de-a572-001b779c76e3"),
                                 UUID.fromString("01234567-0123-0123-0123-0123456789ab"),
                                 "\0", BigInteger.valueOf(Long.MIN_VALUE)),
@@ -64,7 +65,7 @@ public class DataTypesTableDefinition
                                 Double.MAX_VALUE, Float.MAX_VALUE, ImmutableSet.of(4, 5, 6, 7),
                                 Inet4Address.getByName("255.255.255.255"), Integer.MAX_VALUE,
                                 ImmutableList.of(4, 5, 6), ImmutableMap.of("a", 1, "b", 2), ImmutableSet.of(4, 5, 6),
-                                "this is a text value", Timestamp.valueOf("9999-12-31 23:59:59"),
+                                "this is a text value", Timestamp.valueOf(LocalDateTime.of(9999, 12, 31, 23, 59, 59)),
                                 UUID.fromString("d2177dd0-eaa2-11de-a572-001b779c76e3"),
                                 UUID.fromString("01234567-0123-0123-0123-0123456789ab"),
                                 "abc", BigInteger.valueOf(Long.MAX_VALUE)),

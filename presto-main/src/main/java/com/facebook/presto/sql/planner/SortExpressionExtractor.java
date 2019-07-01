@@ -13,64 +13,125 @@
  */
 package com.facebook.presto.sql.planner;
 
-import com.facebook.presto.sql.tree.AstVisitor;
-import com.facebook.presto.sql.tree.ComparisonExpression;
-import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.FieldReference;
-import com.facebook.presto.sql.tree.Node;
-import com.facebook.presto.sql.tree.SymbolReference;
+import com.facebook.presto.metadata.FunctionManager;
+import com.facebook.presto.spi.function.FunctionMetadata;
+import com.facebook.presto.spi.function.OperatorType;
+import com.facebook.presto.spi.relation.CallExpression;
+import com.facebook.presto.spi.relation.ConstantExpression;
+import com.facebook.presto.spi.relation.DeterminismEvaluator;
+import com.facebook.presto.spi.relation.InputReferenceExpression;
+import com.facebook.presto.spi.relation.LambdaDefinitionExpression;
+import com.facebook.presto.spi.relation.LogicalRowExpressions;
+import com.facebook.presto.spi.relation.RowExpression;
+import com.facebook.presto.spi.relation.RowExpressionVisitor;
+import com.facebook.presto.spi.relation.SpecialFormExpression;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.sql.relational.RowExpressionDeterminismEvaluator;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
-import java.util.Objects;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static java.util.Collections.singletonList;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
 
 /**
- * Currently this class handles only simple expressions like:
- *
- * A.a < B.x
- *
- * It could be extended to handle any expressions like:
- *
- * A.a * sin(A.b) / log(B.x) < cos(B.z)
- *
- * by transforming it to:
- *
- * f(A.a, A.b) < g(B.x, B.z)
- *
- * Where f(...) and g(...) would be some functions/expressions. That
- * would allow us to perform binary search on arbitrary complex expressions
- * by sorting position links according to the result of f(...) function.
+ * Extracts sort expression to be used for creating {@link com.facebook.presto.operator.SortedPositionLinks} from join filter expression.
+ * Currently this class can extract sort and search expressions from filter function conjuncts of shape:
+ * <p>
+ * {@code A.a < f(B.x, B.y, B.z)} or {@code f(B.x, B.y, B.z) < A.a}
+ * <p>
+ * where {@code a} is the build side symbol reference and {@code x,y,z} are probe
+ * side symbol references. Any of inequality operators ({@code <,<=,>,>=}) can be used.
+ * Same build side symbol need to be used in all conjuncts.
  */
 public final class SortExpressionExtractor
 {
+    /* TODO:
+       This class could be extended to handle any expressions like:
+       A.a * sin(A.b) / log(B.x) < cos(B.z)
+       by transforming it to:
+       f(A.a, A.b) < g(B.x, B.z)
+       Where f(...) and g(...) would be some functions/expressions. That
+       would allow us to perform binary search on arbitrary complex expressions
+       by sorting position links according to the result of f(...) function.
+     */
     private SortExpressionExtractor() {}
 
-    public static Optional<Expression> extractSortExpression(Set<Symbol> buildSymbols, Expression filter)
+    public static Optional<SortExpressionContext> extractSortExpression(Set<VariableReferenceExpression> buildVariables, RowExpression filter, FunctionManager functionManager)
     {
-        if (!DeterminismEvaluator.isDeterministic(filter)) {
-            return Optional.empty();
+        List<RowExpression> filterConjuncts = LogicalRowExpressions.extractConjuncts(filter);
+        SortExpressionVisitor visitor = new SortExpressionVisitor(buildVariables, functionManager);
+
+        DeterminismEvaluator determinismEvaluator = new RowExpressionDeterminismEvaluator(functionManager);
+        List<SortExpressionContext> sortExpressionCandidates = filterConjuncts.stream()
+                .filter(determinismEvaluator::isDeterministic)
+                .map(conjunct -> conjunct.accept(visitor, null))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .collect(toMap(SortExpressionContext::getSortExpression, identity(), SortExpressionExtractor::merge))
+                .values()
+                .stream()
+                .collect(toImmutableList());
+
+        // For now heuristically pick sort expression which has most search expressions assigned to it.
+        // TODO: make it cost based decision based on symbol statistics
+        return sortExpressionCandidates.stream()
+                .sorted(comparing(context -> -1 * context.getSearchExpressions().size()))
+                .findFirst();
+    }
+
+    private static SortExpressionContext merge(SortExpressionContext left, SortExpressionContext right)
+    {
+        checkArgument(left.getSortExpression().equals(right.getSortExpression()));
+        ImmutableList.Builder<RowExpression> searchExpressions = ImmutableList.builder();
+        searchExpressions.addAll(left.getSearchExpressions());
+        searchExpressions.addAll(right.getSearchExpressions());
+        return new SortExpressionContext(left.getSortExpression(), searchExpressions.build());
+    }
+
+    private static class SortExpressionVisitor
+            implements RowExpressionVisitor<Optional<SortExpressionContext>, Void>
+    {
+        private final Set<VariableReferenceExpression> buildVariables;
+        private final FunctionManager functionManager;
+
+        public SortExpressionVisitor(Set<VariableReferenceExpression> buildVariables, FunctionManager functionManager)
+        {
+            this.buildVariables = buildVariables;
+            this.functionManager = functionManager;
         }
 
-        if (filter instanceof ComparisonExpression) {
-            ComparisonExpression comparison = (ComparisonExpression) filter;
-            switch (comparison.getType()) {
+        @Override
+        public Optional<SortExpressionContext> visitCall(CallExpression call, Void context)
+        {
+            FunctionMetadata functionMetadata = functionManager.getFunctionMetadata(call.getFunctionHandle());
+            if (!functionMetadata.getOperatorType().map(OperatorType::isComparisonOperator).orElse(false)) {
+                return Optional.empty();
+            }
+
+            switch (functionMetadata.getOperatorType().get()) {
                 case GREATER_THAN:
                 case GREATER_THAN_OR_EQUAL:
                 case LESS_THAN:
                 case LESS_THAN_OR_EQUAL:
-                    Optional<SymbolReference> sortChannel = asBuildSymbolReference(buildSymbols, comparison.getRight());
-                    boolean hasBuildReferencesOnOtherSide = hasBuildSymbolReference(buildSymbols, comparison.getLeft());
+                    RowExpression left = call.getArguments().get(0);
+                    RowExpression right = call.getArguments().get(1);
+                    Optional<VariableReferenceExpression> sortChannel = asBuildVariableReference(buildVariables, right);
+                    boolean hasBuildReferencesOnOtherSide = hasBuildVariableReference(buildVariables, left);
                     if (!sortChannel.isPresent()) {
-                        sortChannel = asBuildSymbolReference(buildSymbols, comparison.getLeft());
-                        hasBuildReferencesOnOtherSide = hasBuildSymbolReference(buildSymbols, comparison.getRight());
+                        sortChannel = asBuildVariableReference(buildVariables, left);
+                        hasBuildReferencesOnOtherSide = hasBuildVariableReference(buildVariables, right);
                     }
                     if (sortChannel.isPresent() && !hasBuildReferencesOnOtherSide) {
-                        return sortChannel.map(symbolReference -> (Expression) symbolReference);
+                        return sortChannel.map(variableReference -> new SortExpressionContext(variableReference, singletonList(call)));
                     }
                     return Optional.empty();
                 default:
@@ -78,42 +139,75 @@ public final class SortExpressionExtractor
             }
         }
 
-        return Optional.empty();
+        @Override
+        public Optional<SortExpressionContext> visitInputReference(InputReferenceExpression input, Void context)
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<SortExpressionContext> visitConstant(ConstantExpression literal, Void context)
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<SortExpressionContext> visitLambda(LambdaDefinitionExpression lambda, Void context)
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<SortExpressionContext> visitVariableReference(VariableReferenceExpression reference, Void context)
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<SortExpressionContext> visitSpecialForm(SpecialFormExpression specialForm, Void context)
+        {
+            return Optional.empty();
+        }
     }
 
-    private static Optional<SymbolReference> asBuildSymbolReference(Set<Symbol> buildLayout, Expression expression)
+    private static Optional<VariableReferenceExpression> asBuildVariableReference(Set<VariableReferenceExpression> buildLayout, RowExpression expression)
     {
-        if (expression instanceof SymbolReference) {
-            SymbolReference symbolReference = (SymbolReference) expression;
-            if (buildLayout.contains(new Symbol(symbolReference.getName()))) {
-                return Optional.of(symbolReference);
+        // Currently only we support only symbol as sort expression on build side
+        if (expression instanceof VariableReferenceExpression) {
+            VariableReferenceExpression reference = (VariableReferenceExpression) expression;
+            if (buildLayout.contains(reference)) {
+                return Optional.of(reference);
             }
         }
         return Optional.empty();
     }
 
-    private static boolean hasBuildSymbolReference(Set<Symbol> buildSymbols, Expression expression)
+    private static boolean hasBuildVariableReference(Set<VariableReferenceExpression> buildVariables, RowExpression expression)
     {
-        return new BuildSymbolReferenceFinder(buildSymbols).process(expression);
+        return expression.accept(new BuildVariableReferenceFinder(buildVariables), null);
     }
 
-    private static class BuildSymbolReferenceFinder
-            extends AstVisitor<Boolean, Void>
+    private static class BuildVariableReferenceFinder
+            implements RowExpressionVisitor<Boolean, Void>
     {
-        private final Set<String> buildSymbols;
+        private final Set<VariableReferenceExpression> buildVariables;
 
-        public BuildSymbolReferenceFinder(Set<Symbol> buildSymbols)
+        public BuildVariableReferenceFinder(Set<VariableReferenceExpression> buildVariables)
         {
-            this.buildSymbols = requireNonNull(buildSymbols, "buildSymbols is null").stream()
-                    .map(Symbol::getName)
-                    .collect(toImmutableSet());
+            this.buildVariables = ImmutableSet.copyOf(requireNonNull(buildVariables, "buildVariables is null"));
         }
 
         @Override
-        protected Boolean visitNode(Node node, Void context)
+        public Boolean visitInputReference(InputReferenceExpression input, Void context)
         {
-            for (Node child : node.getChildren()) {
-                if (process(child, context)) {
+            return false;
+        }
+
+        @Override
+        public Boolean visitCall(CallExpression call, Void context)
+        {
+            for (RowExpression argument : call.getArguments()) {
+                if (argument.accept(this, context)) {
                     return true;
                 }
             }
@@ -121,56 +215,32 @@ public final class SortExpressionExtractor
         }
 
         @Override
-        protected Boolean visitSymbolReference(SymbolReference symbolReference, Void context)
+        public Boolean visitConstant(ConstantExpression literal, Void context)
         {
-            return buildSymbols.contains(symbolReference.getName());
-        }
-    }
-
-    public static class SortExpression
-    {
-        private final int channel;
-
-        public SortExpression(int channel)
-        {
-            this.channel = channel;
-        }
-
-        public int getChannel()
-        {
-            return channel;
+            return false;
         }
 
         @Override
-        public boolean equals(Object obj)
+        public Boolean visitLambda(LambdaDefinitionExpression lambda, Void context)
         {
-            if (this == obj) {
-                return true;
-            }
-            if (obj == null || getClass() != obj.getClass()) {
-                return false;
-            }
-            SortExpression other = (SortExpression) obj;
-            return Objects.equals(this.channel, other.channel);
+            return lambda.getBody().accept(this, context);
         }
 
         @Override
-        public int hashCode()
+        public Boolean visitVariableReference(VariableReferenceExpression reference, Void context)
         {
-            return Objects.hash(channel);
+            return buildVariables.contains(reference);
         }
 
-        public String toString()
+        @Override
+        public Boolean visitSpecialForm(SpecialFormExpression specialForm, Void context)
         {
-            return toStringHelper(this)
-                    .add("channel", channel)
-                    .toString();
-        }
-
-        public static SortExpression fromExpression(Expression expression)
-        {
-            checkState(expression instanceof FieldReference, "Unsupported expression type [%s]", expression);
-            return new SortExpression(((FieldReference) expression).getFieldIndex());
+            for (RowExpression argument : specialForm.getArguments()) {
+                if (argument.accept(this, context)) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

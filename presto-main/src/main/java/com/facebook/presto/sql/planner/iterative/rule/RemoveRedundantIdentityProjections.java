@@ -13,47 +13,41 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.Session;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.SymbolAllocator;
-import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.iterative.Pattern;
+import com.facebook.presto.matching.Captures;
+import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
+import com.facebook.presto.sql.relational.ProjectNodeUtils;
 import com.google.common.collect.ImmutableSet;
 
-import java.util.Optional;
+import static com.facebook.presto.sql.planner.plan.Patterns.project;
 
 /**
  * Removes projection nodes that only perform non-renaming identity projections
  */
 public class RemoveRedundantIdentityProjections
-        implements Rule
+        implements Rule<ProjectNode>
 {
-    private static final Pattern PATTERN = Pattern.node(ProjectNode.class);
+    private static final Pattern<ProjectNode> PATTERN = project()
+            .matching(ProjectNodeUtils::isIdentity)
+            // only drop this projection if it does not constrain the outputs
+            // of its child
+            .matching(RemoveRedundantIdentityProjections::outputsSameAsSource);
+
+    private static boolean outputsSameAsSource(ProjectNode node)
+    {
+        return ImmutableSet.copyOf(node.getOutputVariables()).equals(ImmutableSet.copyOf(node.getSource().getOutputVariables()));
+    }
 
     @Override
-    public Pattern getPattern()
+    public Pattern<ProjectNode> getPattern()
     {
         return PATTERN;
     }
 
     @Override
-    public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+    public Result apply(ProjectNode project, Captures captures, Context context)
     {
-        ProjectNode project = (ProjectNode) node;
-
-        if (!project.isIdentity()) {
-            return Optional.empty();
-        }
-
-        // only drop this projection if it does not constrain the outputs
-        // of its child
-        if (!ImmutableSet.copyOf(project.getOutputSymbols()).equals(ImmutableSet.copyOf(project.getSource().getOutputSymbols()))) {
-            return Optional.empty();
-        }
-
-        return Optional.of(project.getSource());
+        return Result.ofPlanNode(project.getSource());
     }
 }

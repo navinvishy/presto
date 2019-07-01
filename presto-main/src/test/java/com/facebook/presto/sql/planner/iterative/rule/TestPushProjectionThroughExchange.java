@@ -13,49 +13,58 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.spi.block.SortOrder;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.sql.planner.OrderingScheme;
 import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
 import com.facebook.presto.sql.planner.plan.Assignments;
 import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.LongLiteral;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
 
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.exchange;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.expression;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.project;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.sort;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
+import static com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder.assignment;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.asSymbolReference;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToRowExpression;
+import static com.facebook.presto.sql.tree.SortItem.NullOrdering.FIRST;
+import static com.facebook.presto.sql.tree.SortItem.Ordering.ASCENDING;
 
 public class TestPushProjectionThroughExchange
         extends BaseRuleTest
 {
     @Test
     public void testDoesNotFireNoExchange()
-            throws Exception
     {
         tester().assertThat(new PushProjectionThroughExchange())
                 .on(p ->
                         p.project(
-                                Assignments.of(p.symbol("x"), new LongLiteral("3")),
-                                p.values(p.symbol("a"))))
+                                assignment(p.variable("x"), new LongLiteral("3")),
+                                p.values(p.variable("a"))))
                 .doesNotFire();
     }
 
     @Test
     public void testDoesNotFireNarrowingProjection()
-            throws Exception
     {
         tester().assertThat(new PushProjectionThroughExchange())
                 .on(p -> {
-                    Symbol a = p.symbol("a");
-                    Symbol b = p.symbol("b");
-                    Symbol c = p.symbol("c");
+                    VariableReferenceExpression a = p.variable("a");
+                    VariableReferenceExpression b = p.variable("b");
+                    VariableReferenceExpression c = p.variable("c");
 
                     return p.project(
                             Assignments.builder()
-                                    .put(a, a.toSymbolReference())
-                                    .put(b, b.toSymbolReference())
+                                    .put(a, castToRowExpression(asSymbolReference(a)))
+                                    .put(b, castToRowExpression(asSymbolReference(b)))
                                     .build(),
                             p.exchange(e -> e
                                     .addSource(p.values(a, b, c))
@@ -67,20 +76,18 @@ public class TestPushProjectionThroughExchange
 
     @Test
     public void testSimpleMultipleInputs()
-            throws Exception
     {
         tester().assertThat(new PushProjectionThroughExchange())
                 .on(p -> {
-                    Symbol a = p.symbol("a");
-                    Symbol b = p.symbol("b");
-                    Symbol c = p.symbol("c");
-                    Symbol c2 = p.symbol("c2");
-                    Symbol x = p.symbol("x");
+                    VariableReferenceExpression a = p.variable("a");
+                    VariableReferenceExpression b = p.variable("b");
+                    VariableReferenceExpression c = p.variable("c");
+                    VariableReferenceExpression c2 = p.variable("c2");
+                    VariableReferenceExpression x = p.variable("x");
                     return p.project(
-                            Assignments.of(
+                            assignment(
                                     x, new LongLiteral("3"),
-                                    c2, new SymbolReference("c")
-                            ),
+                                    c2, new SymbolReference("c")),
                             p.exchange(e -> e
                                     .addSource(
                                             p.values(a))
@@ -93,14 +100,11 @@ public class TestPushProjectionThroughExchange
                 .matches(
                         exchange(
                                 project(
-                                        values(ImmutableList.of("a"))
-                                )
+                                        values(ImmutableList.of("a")))
                                         .withAlias("x1", expression("3")),
                                 project(
-                                        values(ImmutableList.of("b"))
-                                )
-                                        .withAlias("x2", expression("3"))
-                        )
+                                        values(ImmutableList.of("b")))
+                                        .withAlias("x2", expression("3")))
                                 // verify that data originally on symbols aliased as x1 and x2 is part of exchange output
                                 .withAlias("x1")
                                 .withAlias("x2"));
@@ -108,21 +112,20 @@ public class TestPushProjectionThroughExchange
 
     @Test
     public void testPartitioningColumnAndHashWithoutIdentityMappingInProjection()
-            throws Exception
     {
         tester().assertThat(new PushProjectionThroughExchange())
                 .on(p -> {
-                    Symbol a = p.symbol("a");
-                    Symbol b = p.symbol("b");
-                    Symbol h = p.symbol("h");
-                    Symbol aTimes5 = p.symbol("a_times_5");
-                    Symbol bTimes5 = p.symbol("b_times_5");
-                    Symbol hTimes5 = p.symbol("h_times_5");
+                    VariableReferenceExpression a = p.variable("a");
+                    VariableReferenceExpression b = p.variable("b");
+                    VariableReferenceExpression h = p.variable("h");
+                    VariableReferenceExpression aTimes5 = p.variable("a_times_5");
+                    VariableReferenceExpression bTimes5 = p.variable("b_times_5");
+                    VariableReferenceExpression hTimes5 = p.variable("h_times_5");
                     return p.project(
                             Assignments.builder()
-                                    .put(aTimes5, new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Type.MULTIPLY, new SymbolReference("a"), new LongLiteral("5")))
-                                    .put(bTimes5, new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Type.MULTIPLY, new SymbolReference("b"), new LongLiteral("5")))
-                                    .put(hTimes5, new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Type.MULTIPLY, new SymbolReference("h"), new LongLiteral("5")))
+                                    .put(aTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("a"), new LongLiteral("5"))))
+                                    .put(bTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("b"), new LongLiteral("5"))))
+                                    .put(hTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("h"), new LongLiteral("5"))))
                                     .build(),
                             p.exchange(e -> e
                                     .addSource(
@@ -138,17 +141,56 @@ public class TestPushProjectionThroughExchange
                                 exchange(
                                         project(
                                                 values(
-                                                        ImmutableList.of("a", "b", "h")
-                                                )
+                                                        ImmutableList.of("a", "b", "h"))
                                         ).withNumberOfOutputColumns(5)
                                                 .withAlias("b", expression("b"))
                                                 .withAlias("h", expression("h"))
                                                 .withAlias("a_times_5", expression("a * 5"))
                                                 .withAlias("b_times_5", expression("b * 5"))
-                                                .withAlias("h_times_5", expression("h * 5"))
-                                )
+                                                .withAlias("h_times_5", expression("h * 5")))
                         ).withNumberOfOutputColumns(3)
-                                .withExactOutputs("a_times_5", "b_times_5", "h_times_5")
-                );
+                                .withExactOutputs("a_times_5", "b_times_5", "h_times_5"));
+    }
+
+    @Test
+    public void testOrderingColumnsArePreserved()
+    {
+        tester().assertThat(new PushProjectionThroughExchange())
+                .on(p -> {
+                    VariableReferenceExpression a = p.variable("a");
+                    VariableReferenceExpression b = p.variable("b");
+                    VariableReferenceExpression h = p.variable("h");
+                    VariableReferenceExpression aTimes5 = p.variable("a_times_5");
+                    VariableReferenceExpression bTimes5 = p.variable("b_times_5");
+                    VariableReferenceExpression hTimes5 = p.variable("h_times_5");
+                    VariableReferenceExpression sortVariable = p.variable("sortVariable");
+                    OrderingScheme orderingScheme = new OrderingScheme(ImmutableList.of(sortVariable), ImmutableMap.of(sortVariable, SortOrder.ASC_NULLS_FIRST));
+                    return p.project(
+                            Assignments.builder()
+                                    .put(aTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("a"), new LongLiteral("5"))))
+                                    .put(bTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("b"), new LongLiteral("5"))))
+                                    .put(hTimes5, castToRowExpression(new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Operator.MULTIPLY, new SymbolReference("h"), new LongLiteral("5"))))
+                                    .build(),
+                            p.exchange(e -> e
+                                    .addSource(
+                                            p.values(a, b, h, sortVariable))
+                                    .addInputsSet(a, b, h, sortVariable)
+                                    .singleDistributionPartitioningScheme(
+                                            ImmutableList.of(a, b, h, sortVariable))
+                                    .orderingScheme(orderingScheme)));
+                })
+                .matches(
+                        project(
+                                exchange(REMOTE_STREAMING, GATHER, ImmutableList.of(sort("sortSymbol", ASCENDING, FIRST)),
+                                        project(
+                                                values(
+                                                        ImmutableList.of("a", "b", "h", "sortSymbol")))
+                                                .withNumberOfOutputColumns(4)
+                                                .withAlias("a_times_5", expression("a * 5"))
+                                                .withAlias("b_times_5", expression("b * 5"))
+                                                .withAlias("h_times_5", expression("h * 5"))
+                                                .withAlias("sortSymbol", expression("sortSymbol")))
+                        ).withNumberOfOutputColumns(3)
+                                .withExactOutputs("a_times_5", "b_times_5", "h_times_5"));
     }
 }

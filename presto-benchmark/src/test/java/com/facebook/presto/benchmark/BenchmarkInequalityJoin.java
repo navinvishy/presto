@@ -24,6 +24,7 @@ import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
@@ -67,7 +68,7 @@ public class BenchmarkInequalityJoin
 
         // How many positions out of 1000 will be actually joined
         // 10 means 1 - 10/1000 = 99/100 positions will be filtered out
-        @Param({"10"})
+        @Param("10")
         private int filterOutCoefficient;
 
         public MemoryLocalQueryRunner getQueryRunner()
@@ -84,9 +85,9 @@ public class BenchmarkInequalityJoin
             // t1.bucket is in [0, 1000)
             queryRunner.execute(format(
                     "CREATE TABLE memory.default.t1 AS SELECT " +
-                        "orderkey %% %d bucket, " +
-                        "(orderkey * 13) %% 1000 val1 " +
-                    "FROM tpch.tiny.lineitem",
+                            "orderkey %% %d bucket, " +
+                            "(orderkey * 13) %% 1000 val1 " +
+                            "FROM tpch.tiny.lineitem",
                     buckets));
             // t2.val2 is in range [0, 10)
             // t2.bucket is in [0, 1000)
@@ -98,6 +99,13 @@ public class BenchmarkInequalityJoin
                     buckets,
                     filterOutCoefficient));
         }
+
+        @TearDown
+        public void tearDown()
+        {
+            queryRunner.close();
+            queryRunner = null;
+        }
     }
 
     @Benchmark
@@ -105,6 +113,27 @@ public class BenchmarkInequalityJoin
     {
         return context.getQueryRunner()
                 .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) WHERE t1.val1 < t2.val2");
+    }
+
+    @Benchmark
+    public List<Page> benchmarkJoinWithArithmeticInPredicate(Context context)
+    {
+        return context.getQueryRunner()
+                .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t1.val1 < t2.val2 + 10");
+    }
+
+    @Benchmark
+    public List<Page> benchmarkJoinWithFunctionPredicate(Context context)
+    {
+        return context.getQueryRunner()
+                .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t1.val1 < sin(t2.val2)");
+    }
+
+    @Benchmark
+    public List<Page> benchmarkRangePredicateJoin(Context context)
+    {
+        return context.getQueryRunner()
+                .execute("SELECT count(*) FROM t1 JOIN t2 on (t1.bucket = t2.bucket) AND t1.val1 + 1 < t2.val2 AND t2.val2 < t1.val1 + 5 ");
     }
 
     public static void main(String[] args)

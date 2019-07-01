@@ -14,25 +14,24 @@
 package com.facebook.presto.sql.planner.iterative.rule;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.SystemSessionProperties;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.Symbol;
-import com.facebook.presto.sql.planner.SymbolAllocator;
-import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.iterative.Pattern;
+import com.facebook.presto.matching.Captures;
+import com.facebook.presto.matching.Pattern;
+import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.optimizations.joins.JoinGraph;
 import com.facebook.presto.sql.planner.plan.Assignments;
-import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
-import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
+import com.facebook.presto.sql.relational.OriginalExpressionUtils;
 import com.facebook.presto.sql.tree.Expression;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -41,46 +40,53 @@ import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
 
+import static com.facebook.presto.SystemSessionProperties.getJoinReorderingStrategy;
+import static com.facebook.presto.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.AUTOMATIC;
+import static com.facebook.presto.sql.analyzer.FeaturesConfig.JoinReorderingStrategy.ELIMINATE_CROSS_JOINS;
 import static com.facebook.presto.sql.planner.iterative.rule.Util.restrictOutputs;
+import static com.facebook.presto.sql.planner.plan.Patterns.join;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToRowExpression;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.Maps.transformValues;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
 public class EliminateCrossJoins
-        implements Rule
+        implements Rule<JoinNode>
 {
-    private static final Pattern PATTERN = Pattern.node(JoinNode.class);
+    private static final Pattern<JoinNode> PATTERN = join();
 
     @Override
-    public Pattern getPattern()
+    public Pattern<JoinNode> getPattern()
     {
         return PATTERN;
     }
 
     @Override
-    public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+    public boolean isEnabled(Session session)
     {
-        if (!(node instanceof JoinNode)) {
-            return Optional.empty();
-        }
+        // we run this for cost-based reordering also for cases when some of the tables do not have statistics
+        JoinReorderingStrategy joinReorderingStrategy = getJoinReorderingStrategy(session);
+        return joinReorderingStrategy == ELIMINATE_CROSS_JOINS || joinReorderingStrategy == AUTOMATIC;
+    }
 
-        if (!SystemSessionProperties.isJoinReorderingEnabled(session)) {
-            return Optional.empty();
-        }
-
-        JoinGraph joinGraph = JoinGraph.buildShallowFrom(node, lookup);
+    @Override
+    public Result apply(JoinNode node, Captures captures, Context context)
+    {
+        JoinGraph joinGraph = JoinGraph.buildShallowFrom(node, context.getLookup());
         if (joinGraph.size() < 3) {
-            return Optional.empty();
+            return Result.empty();
         }
 
         List<Integer> joinOrder = getJoinOrder(joinGraph);
         if (isOriginalOrder(joinOrder)) {
-            return Optional.empty();
+            return Result.empty();
         }
 
-        PlanNode replacement = buildJoinTree(node.getOutputSymbols(), joinGraph, joinOrder, idAllocator);
-        return Optional.of(replacement);
+        PlanNode replacement = buildJoinTree(node.getOutputVariables(), joinGraph, joinOrder, context.getIdAllocator());
+        return Result.ofPlanNode(replacement);
     }
 
     public static boolean isOriginalOrder(List<Integer> joinOrder)
@@ -111,7 +117,7 @@ public class EliminateCrossJoins
 
         PriorityQueue<PlanNode> nodesToVisit = new PriorityQueue<>(
                 graph.size(),
-                (Comparator<PlanNode>) (node1, node2) -> priorities.get(node1.getId()).compareTo(priorities.get(node2.getId())));
+                comparing(node -> priorities.get(node.getId())));
         Set<PlanNode> visited = new HashSet<>();
 
         nodesToVisit.add(graph.getNode(0));
@@ -143,9 +149,9 @@ public class EliminateCrossJoins
                 .collect(toImmutableList());
     }
 
-    public static PlanNode buildJoinTree(List<Symbol> expectedOutputSymbols, JoinGraph graph, List<Integer> joinOrder, PlanNodeIdAllocator idAllocator)
+    public static PlanNode buildJoinTree(List<VariableReferenceExpression> expectedOutputVariables, JoinGraph graph, List<Integer> joinOrder, PlanNodeIdAllocator idAllocator)
     {
-        requireNonNull(expectedOutputSymbols, "expectedOutputSymbols is null");
+        requireNonNull(expectedOutputVariables, "expectedOutputVariables is null");
         requireNonNull(idAllocator, "idAllocator is null");
         requireNonNull(graph, "graph is null");
         joinOrder = ImmutableList.copyOf(requireNonNull(joinOrder, "joinOrder is null"));
@@ -165,8 +171,8 @@ public class EliminateCrossJoins
                 PlanNode targetNode = edge.getTargetNode();
                 if (alreadyJoinedNodes.contains(targetNode.getId())) {
                     criteria.add(new JoinNode.EquiJoinClause(
-                            edge.getTargetSymbol(),
-                            edge.getSourceSymbol()));
+                            edge.getTargetVariable(),
+                            edge.getSourceVariable()));
                 }
             }
 
@@ -176,9 +182,9 @@ public class EliminateCrossJoins
                     result,
                     rightNode,
                     criteria.build(),
-                    ImmutableList.<Symbol>builder()
-                            .addAll(result.getOutputSymbols())
-                            .addAll(rightNode.getOutputSymbols())
+                    ImmutableList.<VariableReferenceExpression>builder()
+                            .addAll(result.getOutputVariables())
+                            .addAll(rightNode.getOutputVariables())
                             .build(),
                     Optional.empty(),
                     Optional.empty(),
@@ -192,18 +198,18 @@ public class EliminateCrossJoins
             result = new FilterNode(
                     idAllocator.getNextId(),
                     result,
-                    filter);
+                    castToRowExpression(filter));
         }
 
         if (graph.getAssignments().isPresent()) {
             result = new ProjectNode(
                     idAllocator.getNextId(),
                     result,
-                    Assignments.copyOf(graph.getAssignments().get()));
+                    Assignments.copyOf(transformValues(graph.getAssignments().get(), OriginalExpressionUtils::castToRowExpression)));
         }
 
         // If needed, introduce a projection to constrain the outputs to what was originally expected
         // Some nodes are sensitive to what's produced (e.g., DistinctLimit node)
-        return restrictOutputs(idAllocator, result, ImmutableSet.copyOf(expectedOutputSymbols)).orElse(result);
+        return restrictOutputs(idAllocator, result, ImmutableSet.copyOf(expectedOutputVariables)).orElse(result);
     }
 }

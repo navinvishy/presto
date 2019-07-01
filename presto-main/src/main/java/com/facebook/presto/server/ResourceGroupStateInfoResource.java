@@ -39,10 +39,10 @@ import static javax.ws.rs.core.Response.Status.NOT_FOUND;
 @Path("/v1/resourceGroupState")
 public class ResourceGroupStateInfoResource
 {
-    private final ResourceGroupManager resourceGroupManager;
+    private final ResourceGroupManager<?> resourceGroupManager;
 
     @Inject
-    public ResourceGroupStateInfoResource(ResourceGroupManager resourceGroupManager)
+    public ResourceGroupStateInfoResource(ResourceGroupManager<?> resourceGroupManager)
     {
         this.resourceGroupManager = requireNonNull(resourceGroupManager, "resourceGroupManager is null");
     }
@@ -51,15 +51,15 @@ public class ResourceGroupStateInfoResource
     @Produces(MediaType.APPLICATION_JSON)
     @Encoded
     @Path("{resourceGroupId: .+}")
-    public ResourceGroupStateInfo getQueryStateInfos(@PathParam("resourceGroupId") String resourceGroupIdString)
+    public ResourceGroupInfo getQueryStateInfos(@PathParam("resourceGroupId") String resourceGroupIdString)
     {
         if (!isNullOrEmpty(resourceGroupIdString)) {
             try {
-                return resourceGroupManager.getResourceGroupStateInfo(
+                return resourceGroupManager.getResourceGroupInfo(
                         new ResourceGroupId(
-                            Arrays.stream(resourceGroupIdString.split("/"))
-                                    .map(ResourceGroupStateInfoResource::urlDecode)
-                                    .collect(toImmutableList())));
+                                Arrays.stream(resourceGroupIdString.split("/"))
+                                        .map(ResourceGroupStateInfoResource::urlDecode)
+                                        .collect(toImmutableList())));
             }
             catch (NoSuchElementException e) {
                 throw new WebApplicationException(NOT_FOUND);

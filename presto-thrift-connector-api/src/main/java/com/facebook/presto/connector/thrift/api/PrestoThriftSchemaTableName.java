@@ -13,10 +13,10 @@
  */
 package com.facebook.presto.connector.thrift.api;
 
+import com.facebook.drift.annotations.ThriftConstructor;
+import com.facebook.drift.annotations.ThriftField;
+import com.facebook.drift.annotations.ThriftStruct;
 import com.facebook.presto.spi.SchemaTableName;
-import com.facebook.swift.codec.ThriftConstructor;
-import com.facebook.swift.codec.ThriftField;
-import com.facebook.swift.codec.ThriftStruct;
 
 import java.util.Objects;
 
@@ -34,6 +34,11 @@ public final class PrestoThriftSchemaTableName
     {
         this.schemaName = checkValidName(schemaName);
         this.tableName = checkValidName(tableName);
+    }
+
+    public PrestoThriftSchemaTableName(SchemaTableName schemaTableName)
+    {
+        this(schemaTableName.getSchemaName(), schemaTableName.getTableName());
     }
 
     @ThriftField(1)
@@ -80,10 +85,5 @@ public final class PrestoThriftSchemaTableName
     public SchemaTableName toSchemaTableName()
     {
         return new SchemaTableName(getSchemaName(), getTableName());
-    }
-
-    public static PrestoThriftSchemaTableName fromSchemaTableName(SchemaTableName schemaTableName)
-    {
-        return new PrestoThriftSchemaTableName(schemaTableName.getSchemaName(), schemaTableName.getTableName());
     }
 }

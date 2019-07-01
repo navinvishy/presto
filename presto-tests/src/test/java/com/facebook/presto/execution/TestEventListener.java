@@ -16,6 +16,7 @@ package com.facebook.presto.execution;
 import com.facebook.presto.Session;
 import com.facebook.presto.execution.TestEventListenerPlugin.TestingEventListenerPlugin;
 import com.facebook.presto.resourceGroups.ResourceGroupManagerPlugin;
+import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.eventlistener.QueryCompletedEvent;
 import com.facebook.presto.spi.eventlistener.QueryCreatedEvent;
 import com.facebook.presto.spi.eventlistener.SplitCompletedEvent;
@@ -36,6 +37,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static com.facebook.presto.execution.TestQueues.createResourceGroupId;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.stream.Collectors.toSet;
@@ -61,7 +63,7 @@ public class TestEventListener
                 .setSchema("tiny")
                 .setClientInfo("{\"clientVersion\":\"testVersion\"}")
                 .build();
-        queryRunner = new DistributedQueryRunner(session, 1, ImmutableMap.of("experimental.resource-groups-enabled", "true"));
+        queryRunner = new DistributedQueryRunner(session, 1);
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.installPlugin(new TestingEventListenerPlugin(generatedEvents));
         queryRunner.installPlugin(new ResourceGroupManagerPlugin());
@@ -79,6 +81,7 @@ public class TestEventListener
     private void tearDown()
     {
         queryRunner.close();
+        queryRunner = null;
     }
 
     private MaterializedResult runQueryAndWaitForEvents(@Language("SQL") String sql, int numEventsExpected)
@@ -106,8 +109,8 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), "SELECT 1");
 
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
-        assertTrue(queryCompletedEvent.getContext().getResourceGroupName().isPresent());
-        assertEquals(queryCompletedEvent.getContext().getResourceGroupName().get(), "global.user-user");
+        assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryCompletedEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
         assertEquals(queryCompletedEvent.getStatistics().getTotalRows(), 0L);
         assertEquals(queryCompletedEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
         assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryCompletedEvent.getMetadata().getQueryId());
@@ -134,12 +137,12 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), "SELECT sum(linenumber) FROM lineitem");
 
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
-        assertTrue(queryCompletedEvent.getContext().getResourceGroupName().isPresent());
-        assertEquals(queryCompletedEvent.getContext().getResourceGroupName().get(), "global.user-user");
+        assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryCompletedEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
         assertEquals(queryCompletedEvent.getIoMetadata().getOutput(), Optional.empty());
         assertEquals(queryCompletedEvent.getIoMetadata().getInputs().size(), 1);
         assertEquals(queryCompletedEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
-        assertEquals(getOnlyElement(queryCompletedEvent.getIoMetadata().getInputs()).getConnectorId(), "tpch");
+        assertEquals(getOnlyElement(queryCompletedEvent.getIoMetadata().getInputs()).getCatalogName(), "tpch");
         assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryCompletedEvent.getMetadata().getQueryId());
         assertEquals(queryCompletedEvent.getStatistics().getCompletedSplits(), SPLITS_PER_NODE + 2);
 
@@ -163,6 +166,34 @@ public class TestEventListener
 
         assertEquals(actualCompletedPositions, expectedCompletedPositions);
         assertEquals(queryCompletedEvent.getStatistics().getTotalRows(), expectedCompletedPositions);
+    }
+
+    @Test
+    public void testOutputStats()
+            throws Exception
+    {
+        // We expect the following events
+        // QueryCreated: 1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
+        int expectedEvents = 1 + 1 + SPLITS_PER_NODE + 1 + 1;
+        MaterializedResult result = runQueryAndWaitForEvents("SELECT 1 FROM lineitem", expectedEvents);
+        QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryStats queryStats = queryRunner.getQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
+
+        assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
+        assertTrue(queryCompletedEvent.getStatistics().getOutputBytes() > 0L);
+        assertEquals(result.getRowCount(), queryStats.getOutputPositions());
+        assertEquals(result.getRowCount(), queryCompletedEvent.getStatistics().getOutputRows());
+
+        runQueryAndWaitForEvents("SELECT COUNT(1) FROM lineitem", expectedEvents);
+        queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        queryStats = queryRunner.getQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
+
+        assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
+        assertTrue(queryCompletedEvent.getStatistics().getOutputBytes() > 0L);
+        assertEquals(1L, queryStats.getOutputPositions());
+        assertEquals(1L, queryCompletedEvent.getStatistics().getOutputRows());
     }
 
     static class EventsBuilder

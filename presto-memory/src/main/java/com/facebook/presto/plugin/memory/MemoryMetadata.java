@@ -24,16 +24,20 @@ import com.facebook.presto.spi.ConnectorTableLayout;
 import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.ConnectorTableLayoutResult;
 import com.facebook.presto.spi.ConnectorTableMetadata;
+import com.facebook.presto.spi.ConnectorViewDefinition;
 import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.NodeManager;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.SchemaNotFoundException;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SchemaTablePrefix;
+import com.facebook.presto.spi.ViewNotFoundException;
 import com.facebook.presto.spi.connector.ConnectorMetadata;
 import com.facebook.presto.spi.connector.ConnectorOutputMetadata;
 import com.facebook.presto.spi.predicate.TupleDomain;
+import com.facebook.presto.spi.statistics.ComputedStatistics;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
@@ -52,8 +56,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 import static com.facebook.presto.spi.StandardErrorCode.ALREADY_EXISTS;
+import static com.facebook.presto.spi.StandardErrorCode.NOT_FOUND;
+import static com.facebook.presto.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -72,6 +81,7 @@ public class MemoryMetadata
     private final Map<SchemaTableName, Long> tableIds = new HashMap<>();
     private final Map<Long, MemoryTableHandle> tables = new HashMap<>();
     private final Map<Long, Map<HostAddress, MemoryDataFragment>> tableDataFragments = new HashMap<>();
+    private final Map<SchemaTableName, String> views = new HashMap<>();
 
     @Inject
     public MemoryMetadata(NodeManager nodeManager, MemoryConnectorId connectorId)
@@ -94,6 +104,23 @@ public class MemoryMetadata
             throw new PrestoException(ALREADY_EXISTS, format("Schema [%s] already exists", schemaName));
         }
         schemas.add(schemaName);
+    }
+
+    @Override
+    public synchronized void dropSchema(ConnectorSession session, String schemaName)
+    {
+        if (!schemas.contains(schemaName)) {
+            throw new PrestoException(NOT_FOUND, format("Schema [%s] does not exist", schemaName));
+        }
+
+        boolean tablesExist = tables.values().stream()
+                .anyMatch(table -> table.getSchemaName().equals(schemaName));
+
+        if (tablesExist) {
+            throw new PrestoException(SCHEMA_NOT_EMPTY, "Schema not empty: " + schemaName);
+        }
+
+        verify(schemas.remove(schemaName));
     }
 
     @Override
@@ -159,11 +186,12 @@ public class MemoryMetadata
     @Override
     public synchronized void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
     {
+        checkSchemaExists(newTableName.getSchemaName());
         checkTableNotExists(newTableName);
         MemoryTableHandle oldTableHandle = (MemoryTableHandle) tableHandle;
         MemoryTableHandle newTableHandle = new MemoryTableHandle(
                 oldTableHandle.getConnectorId(),
-                oldTableHandle.getSchemaName(),
+                newTableName.getSchemaName(),
                 newTableName.getTableName(),
                 oldTableHandle.getTableId(),
                 oldTableHandle.getColumnHandles());
@@ -174,15 +202,16 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    public synchronized void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
         ConnectorOutputTableHandle outputTableHandle = beginCreateTable(session, tableMetadata, Optional.empty());
-        finishCreateTable(session, outputTableHandle, ImmutableList.of());
+        finishCreateTable(session, outputTableHandle, ImmutableList.of(), ImmutableList.of());
     }
 
     @Override
     public synchronized MemoryOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorNewTableLayout> layout)
     {
+        checkSchemaExists(tableMetadata.getTable().getSchemaName());
         checkTableNotExists(tableMetadata.getTable());
         long nextId = nextTableId.getAndIncrement();
         Set<Node> nodes = nodeManager.getRequiredWorkerNodes();
@@ -199,6 +228,13 @@ public class MemoryMetadata
         return new MemoryOutputTableHandle(table, ImmutableSet.copyOf(tableIds.values()));
     }
 
+    private void checkSchemaExists(String schemaName)
+    {
+        if (!schemas.contains(schemaName)) {
+            throw new SchemaNotFoundException(schemaName);
+        }
+    }
+
     private void checkTableNotExists(SchemaTableName tableName)
     {
         if (tables.values().stream()
@@ -206,10 +242,13 @@ public class MemoryMetadata
                 .anyMatch(tableName::equals)) {
             throw new PrestoException(ALREADY_EXISTS, format("Table [%s] already exists", tableName.toString()));
         }
+        if (views.keySet().contains(tableName)) {
+            throw new PrestoException(ALREADY_EXISTS, format("View [%s] already exists", tableName.toString()));
+        }
     }
 
     @Override
-    public synchronized Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments)
+    public synchronized Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         requireNonNull(tableHandle, "tableHandle is null");
         MemoryOutputTableHandle memoryOutputHandle = (MemoryOutputTableHandle) tableHandle;
@@ -226,13 +265,55 @@ public class MemoryMetadata
     }
 
     @Override
-    public synchronized Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments)
+    public synchronized Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         requireNonNull(insertHandle, "insertHandle is null");
         MemoryInsertTableHandle memoryInsertHandle = (MemoryInsertTableHandle) insertHandle;
 
         updateRowsOnHosts(memoryInsertHandle.getTable(), fragments);
         return Optional.empty();
+    }
+
+    @Override
+    public synchronized void createView(ConnectorSession session, SchemaTableName viewName, String viewData, boolean replace)
+    {
+        checkSchemaExists(viewName.getSchemaName());
+        if (getTableHandle(session, viewName) != null) {
+            throw new PrestoException(ALREADY_EXISTS, "Table already exists: " + viewName);
+        }
+
+        if (replace) {
+            views.put(viewName, viewData);
+        }
+        else if (views.putIfAbsent(viewName, viewData) != null) {
+            throw new PrestoException(ALREADY_EXISTS, "View already exists: " + viewName);
+        }
+    }
+
+    @Override
+    public synchronized void dropView(ConnectorSession session, SchemaTableName viewName)
+    {
+        if (views.remove(viewName) == null) {
+            throw new ViewNotFoundException(viewName);
+        }
+    }
+
+    @Override
+    public synchronized List<SchemaTableName> listViews(ConnectorSession session, String schemaNameOrNull)
+    {
+        return views.keySet().stream()
+                .filter(viewName -> (schemaNameOrNull == null) || schemaNameOrNull.equals(viewName.getSchemaName()))
+                .collect(toImmutableList());
+    }
+
+    @Override
+    public synchronized Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, SchemaTablePrefix prefix)
+    {
+        return views.entrySet().stream()
+                .filter(entry -> prefix.matches(entry.getKey()))
+                .collect(toImmutableMap(
+                        Map.Entry::getKey,
+                        entry -> new ConnectorViewDefinition(entry.getKey(), Optional.empty(), entry.getValue())));
     }
 
     private void updateRowsOnHosts(MemoryTableHandle table, Collection<Slice> fragments)

@@ -39,10 +39,10 @@ public final class ArrayLessThanOrEqualOperator
     @TypeParameter("E")
     @SqlType(StandardTypes.BOOLEAN)
     public static boolean lessThanOrEqual(
-                    @OperatorDependency(operator = LESS_THAN, returnType = StandardTypes.BOOLEAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
-                    @TypeParameter("E") Type type,
-                    @SqlType("array(E)") Block leftArray,
-                    @SqlType("array(E)") Block rightArray)
+            @OperatorDependency(operator = LESS_THAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
+            @TypeParameter("E") Type type,
+            @SqlType("array(E)") Block leftArray,
+            @SqlType("array(E)") Block rightArray)
     {
         int len = Math.min(leftArray.getPositionCount(), rightArray.getPositionCount());
         int index = 0;
@@ -72,7 +72,7 @@ public final class ArrayLessThanOrEqualOperator
     @TypeParameterSpecialization(name = "E", nativeContainerType = long.class)
     @SqlType(StandardTypes.BOOLEAN)
     public static boolean lessThanOrEqualLong(
-            @OperatorDependency(operator = LESS_THAN, returnType = StandardTypes.BOOLEAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
+            @OperatorDependency(operator = LESS_THAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
             @TypeParameter("E") Type type,
             @SqlType("array(E)") Block leftArray,
             @SqlType("array(E)") Block rightArray)

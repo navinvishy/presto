@@ -15,15 +15,15 @@ package com.facebook.presto.operator.scalar;
 
 import com.facebook.presto.annotation.UsedByGeneratedCode;
 import com.facebook.presto.metadata.BoundVariables;
-import com.facebook.presto.metadata.FunctionKind;
-import com.facebook.presto.metadata.FunctionRegistry;
-import com.facebook.presto.metadata.Signature;
+import com.facebook.presto.metadata.FunctionManager;
 import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.operator.aggregation.TypedSet;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
+import com.facebook.presto.spi.function.FunctionKind;
+import com.facebook.presto.spi.function.Signature;
 import com.facebook.presto.spi.type.MapType;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
@@ -35,8 +35,10 @@ import com.google.common.collect.ImmutableList;
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
 
-import static com.facebook.presto.metadata.Signature.typeVariable;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.ArgumentProperty.valueTypeArgumentProperty;
+import static com.facebook.presto.operator.scalar.ScalarFunctionImplementation.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static com.facebook.presto.spi.function.Signature.typeVariable;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.sql.gen.VarArgsToArrayAdapterGenerator.generateVarArgsToArrayAdapter;
 import static com.facebook.presto.util.Reflection.methodHandle;
@@ -84,7 +86,7 @@ public final class MapConcatFunction
     }
 
     @Override
-    public ScalarFunctionImplementation specialize(BoundVariables boundVariables, int arity, TypeManager typeManager, FunctionRegistry functionRegistry)
+    public ScalarFunctionImplementation specialize(BoundVariables boundVariables, int arity, TypeManager typeManager, FunctionManager functionManager)
     {
         if (arity < 2) {
             throw new PrestoException(INVALID_FUNCTION_ARGUMENT, "There must be two or more concatenation arguments to " + FUNCTION_NAME);
@@ -105,12 +107,9 @@ public final class MapConcatFunction
 
         return new ScalarFunctionImplementation(
                 false,
-                nCopies(arity, false),
-                nCopies(arity, false),
-                nCopies(arity, Optional.empty()),
+                nCopies(arity, valueTypeArgumentProperty(RETURN_NULL_ON_NULL)),
                 methodHandleAndConstructor.getMethodHandle(),
-                Optional.of(methodHandleAndConstructor.getConstructor()),
-                isDeterministic());
+                Optional.of(methodHandleAndConstructor.getConstructor()));
     }
 
     @UsedByGeneratedCode
@@ -144,18 +143,16 @@ public final class MapConcatFunction
         // TODO: we should move TypedSet into user state as well
         Type keyType = mapType.getKeyType();
         Type valueType = mapType.getValueType();
-        TypedSet typedSet = new TypedSet(keyType, entries / 2);
+        TypedSet typedSet = new TypedSet(keyType, entries / 2, FUNCTION_NAME);
         BlockBuilder mapBlockBuilder = pageBuilder.getBlockBuilder(0);
         BlockBuilder blockBuilder = mapBlockBuilder.beginBlockEntry();
 
         // the last map
         Block map = maps[lastMapIndex];
-        int total = 0;
         for (int i = 0; i < map.getPositionCount(); i += 2) {
             typedSet.add(map, i);
             keyType.appendTo(map, i, blockBuilder);
             valueType.appendTo(map, i + 1, blockBuilder);
-            total++;
         }
         // the map between the last and the first
         for (int idx = lastMapIndex - 1; idx > firstMapIndex; idx--) {
@@ -165,7 +162,6 @@ public final class MapConcatFunction
                     typedSet.add(map, i);
                     keyType.appendTo(map, i, blockBuilder);
                     valueType.appendTo(map, i + 1, blockBuilder);
-                    total++;
                 }
             }
         }
@@ -175,7 +171,6 @@ public final class MapConcatFunction
             if (!typedSet.contains(map, i)) {
                 keyType.appendTo(map, i, blockBuilder);
                 valueType.appendTo(map, i + 1, blockBuilder);
-                total++;
             }
         }
 

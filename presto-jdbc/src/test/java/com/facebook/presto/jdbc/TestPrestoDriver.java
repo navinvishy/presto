@@ -16,6 +16,7 @@ package com.facebook.presto.jdbc;
 import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.plugin.blackhole.BlackHolePlugin;
 import com.facebook.presto.server.testing.TestingPrestoServer;
+import com.facebook.presto.spi.security.SelectedRole;
 import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.BigintType;
 import com.facebook.presto.spi.type.BooleanType;
@@ -36,6 +37,7 @@ import com.facebook.presto.tpch.TpchMetadata;
 import com.facebook.presto.tpch.TpchPlugin;
 import com.facebook.presto.type.ColorType;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.log.Logging;
 import io.airlift.units.Duration;
@@ -62,14 +64,18 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.GregorianCalendar;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 import static com.facebook.presto.execution.QueryState.FAILED;
+import static com.facebook.presto.execution.QueryState.RUNNING;
 import static com.facebook.presto.spi.type.CharType.createCharType;
 import static com.facebook.presto.spi.type.DecimalType.createDecimalType;
 import static com.facebook.presto.spi.type.VarcharType.createUnboundedVarcharType;
@@ -88,6 +94,7 @@ import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.toList;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
@@ -119,7 +126,7 @@ public class TestPrestoDriver
         executorService = newCachedThreadPool(daemonThreadsNamed("test-%s"));
     }
 
-    private static void waitForNodeRefresh(TestingPrestoServer server)
+    static void waitForNodeRefresh(TestingPrestoServer server)
             throws InterruptedException
     {
         long start = System.nanoTime();
@@ -134,13 +141,21 @@ public class TestPrestoDriver
     {
         try (Connection connection = createConnection("blackhole", "blackhole");
                 Statement statement = connection.createStatement()) {
+            assertEquals(statement.executeUpdate("CREATE SCHEMA blackhole.blackhole"), 0);
             assertEquals(statement.executeUpdate("CREATE TABLE test_table (x bigint)"), 0);
+
+            assertEquals(statement.executeUpdate("CREATE TABLE slow_test_table (x bigint) " +
+                    "WITH (" +
+                    "   split_count = 1, " +
+                    "   pages_per_split = 1, " +
+                    "   rows_per_page = 1, " +
+                    "   page_processing_delay = '1m'" +
+                    ")"), 0);
         }
     }
 
     @AfterClass(alwaysRun = true)
     public void teardown()
-            throws Exception
     {
         closeQuietly(server);
         executorService.shutdownNow();
@@ -157,7 +172,7 @@ public class TestPrestoDriver
                         "  123 _integer" +
                         ",  12300000000 _bigint" +
                         ", 'foo' _varchar" +
-                        ", 0.1 _double" +
+                        ", 0.1E0 _double" +
                         ", true _boolean" +
                         ", cast('hello' as varbinary) _varbinary" +
                         ", DECIMAL '1234567890.1234567' _decimal_short" +
@@ -175,7 +190,7 @@ public class TestPrestoDriver
                     assertEquals(metadata.getColumnType(2), Types.BIGINT);
 
                     assertEquals(metadata.getColumnLabel(3), "_varchar");
-                    assertEquals(metadata.getColumnType(3), Types.LONGNVARCHAR);
+                    assertEquals(metadata.getColumnType(3), Types.VARCHAR);
 
                     assertEquals(metadata.getColumnLabel(4), "_double");
                     assertEquals(metadata.getColumnType(4), Types.DOUBLE);
@@ -184,7 +199,7 @@ public class TestPrestoDriver
                     assertEquals(metadata.getColumnType(5), Types.BOOLEAN);
 
                     assertEquals(metadata.getColumnLabel(6), "_varbinary");
-                    assertEquals(metadata.getColumnType(6), Types.LONGVARBINARY);
+                    assertEquals(metadata.getColumnType(6), Types.VARBINARY);
 
                     assertEquals(metadata.getColumnLabel(7), "_decimal_short");
                     assertEquals(metadata.getColumnType(7), Types.DECIMAL);
@@ -369,7 +384,7 @@ public class TestPrestoDriver
                 ResultSetMetaData metadata = rs.getMetaData();
                 assertEquals(metadata.getColumnCount(), 1);
                 assertEquals(metadata.getColumnLabel(1), "TABLE_CAT");
-                assertEquals(metadata.getColumnType(1), Types.LONGNVARCHAR);
+                assertEquals(metadata.getColumnType(1), Types.VARCHAR);
             }
         }
     }
@@ -417,6 +432,7 @@ public class TestPrestoDriver
         List<List<String>> blackhole = new ArrayList<>();
         blackhole.add(list("blackhole", "information_schema"));
         blackhole.add(list("blackhole", "default"));
+        blackhole.add(list("blackhole", "blackhole"));
 
         List<List<String>> test = new ArrayList<>();
         test.add(list(TEST_CATALOG, "information_schema"));
@@ -501,10 +517,10 @@ public class TestPrestoDriver
         assertEquals(metadata.getColumnCount(), 2);
 
         assertEquals(metadata.getColumnLabel(1), "TABLE_SCHEM");
-        assertEquals(metadata.getColumnType(1), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(1), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(2), "TABLE_CATALOG");
-        assertEquals(metadata.getColumnType(2), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(2), Types.VARCHAR);
     }
 
     @Test
@@ -690,34 +706,34 @@ public class TestPrestoDriver
         assertEquals(metadata.getColumnCount(), 10);
 
         assertEquals(metadata.getColumnLabel(1), "TABLE_CAT");
-        assertEquals(metadata.getColumnType(1), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(1), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(2), "TABLE_SCHEM");
-        assertEquals(metadata.getColumnType(2), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(2), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(3), "TABLE_NAME");
-        assertEquals(metadata.getColumnType(3), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(3), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(4), "TABLE_TYPE");
-        assertEquals(metadata.getColumnType(4), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(4), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(5), "REMARKS");
-        assertEquals(metadata.getColumnType(5), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(5), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(6), "TYPE_CAT");
-        assertEquals(metadata.getColumnType(6), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(6), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(7), "TYPE_SCHEM");
-        assertEquals(metadata.getColumnType(7), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(7), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(8), "TYPE_NAME");
-        assertEquals(metadata.getColumnType(8), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(8), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(9), "SELF_REFERENCING_COL_NAME");
-        assertEquals(metadata.getColumnType(9), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(9), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(10), "REF_GENERATION");
-        assertEquals(metadata.getColumnType(10), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(10), Types.VARCHAR);
     }
 
     @Test
@@ -733,7 +749,7 @@ public class TestPrestoDriver
                 assertEquals(metadata.getColumnCount(), 1);
 
                 assertEquals(metadata.getColumnLabel(1), "TABLE_TYPE");
-                assertEquals(metadata.getColumnType(1), Types.LONGNVARCHAR);
+                assertEquals(metadata.getColumnType(1), Types.VARCHAR);
             }
         }
     }
@@ -750,7 +766,7 @@ public class TestPrestoDriver
                 assertEquals(rs.getString("TABLE_SCHEM"), "information_schema");
                 assertEquals(rs.getString("TABLE_NAME"), "tables");
                 assertEquals(rs.getString("COLUMN_NAME"), "table_name");
-                assertEquals(rs.getInt("DATA_TYPE"), Types.LONGNVARCHAR);
+                assertEquals(rs.getInt("DATA_TYPE"), Types.VARCHAR);
                 assertTrue(rs.next());
                 assertEquals(rs.getString("TABLE_CAT"), "system");
                 assertEquals(rs.getString("TABLE_SCHEM"), "information_schema");
@@ -826,9 +842,9 @@ public class TestPrestoDriver
                             "c_char_345 char(345), " +
                             "c_varbinary varbinary, " +
                             "c_time time, " +
-                            "c_time_with_time_zone \"time with time zone\", " +
+                            "c_time_with_time_zone time with time zone, " +
                             "c_timestamp timestamp, " +
-                            "c_timestamp_with_time_zone \"timestamp with time zone\", " +
+                            "c_timestamp_with_time_zone timestamp with time zone, " +
                             "c_date date, " +
                             "c_decimal_8_2 decimal(8,2), " +
                             "c_decimal_38_0 decimal(38,0), " +
@@ -845,10 +861,10 @@ public class TestPrestoDriver
                 assertColumnSpec(rs, Types.TINYINT, 3L, 10L, null, null, TinyintType.TINYINT);
                 assertColumnSpec(rs, Types.REAL, 24L, 2L, null, null, RealType.REAL);
                 assertColumnSpec(rs, Types.DOUBLE, 53L, 2L, null, null, DoubleType.DOUBLE);
-                assertColumnSpec(rs, Types.LONGNVARCHAR, 1234L, null, null, 1234L, createVarcharType(1234));
-                assertColumnSpec(rs, Types.LONGNVARCHAR, (long) Integer.MAX_VALUE, null, null, (long) Integer.MAX_VALUE, createUnboundedVarcharType());
+                assertColumnSpec(rs, Types.VARCHAR, 1234L, null, null, 1234L, createVarcharType(1234));
+                assertColumnSpec(rs, Types.VARCHAR, (long) Integer.MAX_VALUE, null, null, (long) Integer.MAX_VALUE, createUnboundedVarcharType());
                 assertColumnSpec(rs, Types.CHAR, 345L, null, null, 345L, createCharType(345));
-                assertColumnSpec(rs, Types.LONGVARBINARY, (long) Integer.MAX_VALUE, null, null, (long) Integer.MAX_VALUE, VarbinaryType.VARBINARY);
+                assertColumnSpec(rs, Types.VARBINARY, (long) Integer.MAX_VALUE, null, null, (long) Integer.MAX_VALUE, VarbinaryType.VARBINARY);
                 assertColumnSpec(rs, Types.TIME, 8L, null, null, null, TimeType.TIME);
                 assertColumnSpec(rs, Types.TIME_WITH_TIMEZONE, 14L, null, null, null, TimeWithTimeZoneType.TIME_WITH_TIME_ZONE);
                 assertColumnSpec(rs, Types.TIMESTAMP, 23L, null, null, null, TimestampType.TIMESTAMP);
@@ -882,22 +898,22 @@ public class TestPrestoDriver
         assertEquals(metadata.getColumnCount(), 24);
 
         assertEquals(metadata.getColumnLabel(1), "TABLE_CAT");
-        assertEquals(metadata.getColumnType(1), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(1), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(2), "TABLE_SCHEM");
-        assertEquals(metadata.getColumnType(2), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(2), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(3), "TABLE_NAME");
-        assertEquals(metadata.getColumnType(3), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(3), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(4), "COLUMN_NAME");
-        assertEquals(metadata.getColumnType(4), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(4), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(5), "DATA_TYPE");
         assertEquals(metadata.getColumnType(5), Types.BIGINT);
 
         assertEquals(metadata.getColumnLabel(6), "TYPE_NAME");
-        assertEquals(metadata.getColumnType(6), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(6), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(7), "COLUMN_SIZE");
         assertEquals(metadata.getColumnType(7), Types.BIGINT);
@@ -915,10 +931,10 @@ public class TestPrestoDriver
         assertEquals(metadata.getColumnType(11), Types.BIGINT);
 
         assertEquals(metadata.getColumnLabel(12), "REMARKS");
-        assertEquals(metadata.getColumnType(12), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(12), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(13), "COLUMN_DEF");
-        assertEquals(metadata.getColumnType(13), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(13), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(14), "SQL_DATA_TYPE");
         assertEquals(metadata.getColumnType(14), Types.BIGINT);
@@ -933,25 +949,25 @@ public class TestPrestoDriver
         assertEquals(metadata.getColumnType(17), Types.BIGINT);
 
         assertEquals(metadata.getColumnLabel(18), "IS_NULLABLE");
-        assertEquals(metadata.getColumnType(18), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(18), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(19), "SCOPE_CATALOG");
-        assertEquals(metadata.getColumnType(19), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(19), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(20), "SCOPE_SCHEMA");
-        assertEquals(metadata.getColumnType(20), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(20), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(21), "SCOPE_TABLE");
-        assertEquals(metadata.getColumnType(21), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(21), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(22), "SOURCE_DATA_TYPE");
         assertEquals(metadata.getColumnType(22), Types.BIGINT);
 
         assertEquals(metadata.getColumnLabel(23), "IS_AUTOINCREMENT");
-        assertEquals(metadata.getColumnType(23), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(23), Types.VARCHAR);
 
         assertEquals(metadata.getColumnLabel(24), "IS_GENERATEDCOLUMN");
-        assertEquals(metadata.getColumnType(24), Types.LONGNVARCHAR);
+        assertEquals(metadata.getColumnType(24), Types.VARCHAR);
     }
 
     @Test
@@ -1224,6 +1240,27 @@ public class TestPrestoDriver
     }
 
     @Test
+    public void testGetMoreResultsClearsUpdateCount()
+            throws Exception
+    {
+        try (Connection connection = createConnection("blackhole", "default")) {
+            try (PrestoStatement statement = connection.createStatement().unwrap(PrestoStatement.class)) {
+                assertFalse(statement.execute("CREATE TABLE test_more_results_clears_update_count (id bigint)"));
+                assertEquals(statement.getUpdateCount(), 0);
+                assertEquals(statement.getUpdateType(), "CREATE TABLE");
+                assertFalse(statement.getMoreResults());
+                assertEquals(statement.getUpdateCount(), -1);
+                assertNull(statement.getUpdateType());
+            }
+            finally {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("DROP TABLE test_more_results_clears_update_count");
+                }
+            }
+        }
+    }
+
+    @Test
     public void testSetTimeZoneId()
             throws Exception
     {
@@ -1368,30 +1405,39 @@ public class TestPrestoDriver
         }
     }
 
-    @Test(timeOut = 10000)
-    public void testQueryCancellation()
+    @Test
+    public void testSetRole()
             throws Exception
     {
-        try (Connection connection = createConnection("blackhole", "blackhole");
-                Statement statement = connection.createStatement()) {
-            statement.executeUpdate("CREATE TABLE test_cancellation (key BIGINT) " +
-                    "WITH (" +
-                    "   split_count = 1, " +
-                    "   pages_per_split = 1, " +
-                    "   rows_per_page = 1, " +
-                    "   page_processing_delay = '1m'" +
-                    ")");
+        try (PrestoConnection connection = createConnection(TEST_CATALOG, "tiny").unwrap(PrestoConnection.class)) {
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("SET ROLE ALL");
+            }
+            assertEquals(connection.getRoles(), ImmutableMap.of(TEST_CATALOG, new SelectedRole(SelectedRole.Type.ALL, Optional.empty())));
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("SET ROLE NONE");
+            }
+            assertEquals(connection.getRoles(), ImmutableMap.of(TEST_CATALOG, new SelectedRole(SelectedRole.Type.NONE, Optional.empty())));
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate("SET ROLE bar");
+            }
+            assertEquals(connection.getRoles(), ImmutableMap.of(TEST_CATALOG, new SelectedRole(SelectedRole.Type.ROLE, Optional.of("bar"))));
         }
+    }
 
+    @Test(timeOut = 10000)
+    public void testQueryCancelByInterrupt()
+            throws Exception
+    {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch queryFinished = new CountDownLatch(1);
         AtomicReference<String> queryId = new AtomicReference<>();
         AtomicReference<Throwable> queryFailure = new AtomicReference<>();
 
         Future<?> queryFuture = executorService.submit(() -> {
-            try (Connection connection = createConnection("blackhole", "default");
+            try (Connection connection = createConnection("blackhole", "blackhole");
                     Statement statement = connection.createStatement();
-                    ResultSet resultSet = statement.executeQuery("SELECT * FROM test_cancellation")) {
+                    ResultSet resultSet = statement.executeQuery("SELECT * FROM slow_test_table")) {
                 queryId.set(resultSet.unwrap(PrestoResultSet.class).getQueryId());
                 queryStarted.countDown();
                 try {
@@ -1417,16 +1463,98 @@ public class TestPrestoDriver
 
         // make sure the query was aborted
         assertTrue(queryFinished.await(10, SECONDS));
-        assertNotNull(queryFailure.get());
+        assertThat(queryFailure.get())
+                .isInstanceOf(SQLException.class)
+                .hasMessage("ResultSet thread was interrupted");
         assertEquals(getQueryState(queryId.get()), FAILED);
+    }
+
+    @Test(timeOut = 10000)
+    public void testQueryCancelExplicit()
+            throws Exception
+    {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch queryFinished = new CountDownLatch(1);
+        AtomicReference<String> queryId = new AtomicReference<>();
+        AtomicReference<Throwable> queryFailure = new AtomicReference<>();
 
         try (Connection connection = createConnection("blackhole", "blackhole");
                 Statement statement = connection.createStatement()) {
-            statement.executeUpdate("DROP TABLE test_cancellation");
+            // execute the slow query on another thread
+            executorService.execute(() -> {
+                try (ResultSet resultSet = statement.executeQuery("SELECT * FROM slow_test_table")) {
+                    queryId.set(resultSet.unwrap(PrestoResultSet.class).getQueryId());
+                    queryStarted.countDown();
+                    resultSet.next();
+                }
+                catch (SQLException t) {
+                    queryFailure.set(t);
+                }
+                finally {
+                    queryFinished.countDown();
+                }
+            });
+
+            // start query and make sure it is not finished
+            queryStarted.await(10, SECONDS);
+            assertNotNull(queryId.get());
+            assertFalse(getQueryState(queryId.get()).isDone());
+
+            // cancel the query from this test thread
+            statement.cancel();
+
+            // make sure the query was aborted
+            queryFinished.await(10, SECONDS);
+            assertNotNull(queryFailure.get());
+            assertEquals(getQueryState(queryId.get()), FAILED);
         }
     }
 
-    @Test(timeOut = 4000)
+    @Test(timeOut = 10000)
+    public void testUpdateCancelExplicit()
+            throws Exception
+    {
+        CountDownLatch queryFinished = new CountDownLatch(1);
+        AtomicReference<String> queryId = new AtomicReference<>();
+        AtomicReference<Throwable> queryFailure = new AtomicReference<>();
+        String queryUuid = "/* " + UUID.randomUUID().toString() + " */";
+
+        try (Connection connection = createConnection("blackhole", "blackhole");
+                Statement statement = connection.createStatement()) {
+            // execute the slow update on another thread
+            executorService.execute(() -> {
+                try {
+                    statement.executeUpdate("CREATE TABLE test_cancel_create AS SELECT * FROM slow_test_table " + queryUuid);
+                }
+                catch (SQLException t) {
+                    queryFailure.set(t);
+                }
+                finally {
+                    queryFinished.countDown();
+                }
+            });
+
+            // start query and make sure it is not finished
+            while (true) {
+                Optional<QueryState> state = findQueryState(queryUuid);
+                if (state.isPresent()) {
+                    assertFalse(state.get().isDone());
+                    break;
+                }
+                MILLISECONDS.sleep(50);
+            }
+
+            // cancel the query from this test thread
+            statement.cancel();
+
+            // make sure the query was aborted
+            queryFinished.await(10, SECONDS);
+            assertNotNull(queryFailure.get());
+            assertEquals(findQueryState(queryUuid), Optional.of(FAILED));
+        }
+    }
+
+    @Test(timeOut = 10000)
     public void testQueryTimeout()
             throws Exception
     {
@@ -1445,7 +1573,7 @@ public class TestPrestoDriver
         AtomicReference<Throwable> queryFailure = new AtomicReference<>();
 
         executorService.submit(() -> {
-            try (Connection connection = createConnection("blackhole", "default");
+            try (Connection connection = createConnection("blackhole", "blackhole");
                     Statement statement = connection.createStatement()) {
                 statement.setQueryTimeout(1);
                 try (ResultSet resultSet = statement.executeQuery("SELECT * FROM test_query_timeout")) {
@@ -1464,13 +1592,54 @@ public class TestPrestoDriver
         });
 
         // make sure the query timed out
-        assertTrue(queryFinished.await(2, SECONDS));
+        queryFinished.await();
         assertNotNull(queryFailure.get());
         assertContains(queryFailure.get().getMessage(), "Query exceeded maximum time limit of 1.00s");
 
         try (Connection connection = createConnection("blackhole", "blackhole");
                 Statement statement = connection.createStatement()) {
             statement.executeUpdate("DROP TABLE test_query_timeout");
+        }
+    }
+
+    @Test(timeOut = 10000)
+    public void testQueryPartialCancel()
+            throws Exception
+    {
+        try (Connection connection = createConnection("blackhole", "blackhole");
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery("SELECT count(*) FROM slow_test_table")) {
+            statement.unwrap(PrestoStatement.class).partialCancel();
+            assertTrue(resultSet.next());
+            assertEquals(resultSet.getLong(1), 0);
+        }
+    }
+
+    @Test(timeOut = 10000)
+    public void testUpdatePartialCancel()
+            throws Exception
+    {
+        CountDownLatch queryRunning = new CountDownLatch(1);
+
+        try (Connection connection = createConnection("blackhole", "blackhole");
+                Statement statement = connection.createStatement()) {
+            // execute the slow update on another thread
+            Future<Integer> future = executorService.submit(() ->
+                    statement.executeUpdate("INSERT INTO test_table SELECT count(*) x FROM slow_test_table"));
+
+            // wait for query to start running
+            statement.unwrap(PrestoStatement.class).setProgressMonitor(stats -> {
+                if (stats.getState().equals(RUNNING.toString())) {
+                    queryRunning.countDown();
+                }
+            });
+            queryRunning.await(10, SECONDS);
+
+            // perform partial cancel from this test thread
+            statement.unwrap(PrestoStatement.class).partialCancel();
+
+            // make sure query completes
+            assertEquals(future.get(10, SECONDS), (Integer) 1);
         }
     }
 
@@ -1483,6 +1652,22 @@ public class TestPrestoDriver
                 ResultSet resultSet = statement.executeQuery(sql)) {
             assertTrue(resultSet.next(), "Query was not found");
             return QueryState.valueOf(requireNonNull(resultSet.getString(1)));
+        }
+    }
+
+    private Optional<QueryState> findQueryState(String text)
+            throws SQLException
+    {
+        String sql = format("SELECT state FROM system.runtime.queries WHERE regexp_like(query, '%s$') /* */", Pattern.quote(text));
+        try (Connection connection = createConnection();
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+            if (!resultSet.next()) {
+                return Optional.empty();
+            }
+            QueryState state = QueryState.valueOf(requireNonNull(resultSet.getString(1)));
+            assertFalse(resultSet.next(), "Found multiple queries");
+            return Optional.of(state);
         }
     }
 

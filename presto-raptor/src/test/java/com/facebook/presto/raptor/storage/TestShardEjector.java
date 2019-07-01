@@ -14,7 +14,7 @@
 package com.facebook.presto.raptor.storage;
 
 import com.facebook.presto.client.NodeVersion;
-import com.facebook.presto.metadata.PrestoNode;
+import com.facebook.presto.metadata.InternalNode;
 import com.facebook.presto.raptor.backup.BackupStore;
 import com.facebook.presto.raptor.metadata.ColumnInfo;
 import com.facebook.presto.raptor.metadata.MetadataDao;
@@ -48,7 +48,8 @@ import static com.facebook.presto.raptor.metadata.SchemaDaoUtil.createTablesWith
 import static com.facebook.presto.raptor.metadata.TestDatabaseShardManager.createShardManager;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.google.common.io.Files.createTempDir;
-import static io.airlift.testing.FileUtils.deleteRecursively;
+import static com.google.common.io.MoreFiles.deleteRecursively;
+import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.stream.Collectors.toSet;
@@ -56,6 +57,7 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
+@Test(singleThreaded = true)
 public class TestShardEjector
 {
     private IDBI dbi;
@@ -66,7 +68,6 @@ public class TestShardEjector
 
     @BeforeMethod
     public void setup()
-            throws Exception
     {
         dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime());
         dummyHandle = dbi.open();
@@ -80,12 +81,13 @@ public class TestShardEjector
 
     @AfterMethod(alwaysRun = true)
     public void teardown()
+            throws Exception
     {
         if (dummyHandle != null) {
             dummyHandle.close();
         }
         if (dataDir != null) {
-            deleteRecursively(dataDir);
+            deleteRecursively(dataDir.toPath(), ALLOW_INSECURE);
         }
     }
 
@@ -197,7 +199,7 @@ public class TestShardEjector
 
     private static Node createTestingNode(String identifier)
     {
-        return new PrestoNode(identifier, URI.create("http://test"), NodeVersion.UNKNOWN, false);
+        return new InternalNode(identifier, URI.create("http://test"), NodeVersion.UNKNOWN, false);
     }
 
     private static class TestingBackupStore

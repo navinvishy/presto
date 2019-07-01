@@ -14,27 +14,26 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.execution.warnings.WarningCollector;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.sql.planner.SymbolAllocator;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.DistinctLimitNode;
 import com.facebook.presto.sql.planner.plan.LimitNode;
 import com.facebook.presto.sql.planner.plan.MarkDistinctNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.SortNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
 import com.facebook.presto.sql.planner.plan.UnionNode;
-import com.facebook.presto.sql.planner.plan.ValuesNode;
 import com.google.common.collect.ImmutableList;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
@@ -44,7 +43,7 @@ public class LimitPushDown
         implements PlanOptimizer
 {
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, Map<Symbol, Type> types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
@@ -120,8 +119,8 @@ public class LimitPushDown
             // return empty ValuesNode in case of limit 0
             if (count == 0) {
                 return new ValuesNode(idAllocator.getNextId(),
-                                        node.getOutputSymbols(),
-                                        ImmutableList.of());
+                        node.getOutputVariables(),
+                        ImmutableList.of());
             }
 
             // default visitPlan logic will insert the limit node
@@ -136,10 +135,10 @@ public class LimitPushDown
 
             if (limit != null &&
                     node.getAggregations().isEmpty() &&
-                    node.getOutputSymbols().size() == node.getGroupingKeys().size() &&
-                    node.getOutputSymbols().containsAll(node.getGroupingKeys())) {
+                    node.getOutputVariables().size() == node.getGroupingKeys().size() &&
+                    node.getOutputVariables().containsAll(node.getGroupingKeys())) {
                 PlanNode rewrittenSource = context.rewrite(node.getSource());
-                return new DistinctLimitNode(idAllocator.getNextId(), rewrittenSource, limit.getCount(), false, rewrittenSource.getOutputSymbols(), Optional.empty());
+                return new DistinctLimitNode(idAllocator.getNextId(), rewrittenSource, limit.getCount(), false, rewrittenSource.getOutputVariables(), Optional.empty());
             }
             PlanNode rewrittenNode = context.defaultRewrite(node);
             if (limit != null) {
@@ -179,7 +178,7 @@ public class LimitPushDown
             if (limit != null) {
                 count = Math.min(count, limit.getCount());
             }
-            return new TopNNode(node.getId(), rewrittenSource, count, node.getOrderBy(), node.getOrderings(), node.getStep());
+            return new TopNNode(node.getId(), rewrittenSource, count, node.getOrderingScheme(), node.getStep());
         }
 
         @Override
@@ -190,10 +189,10 @@ public class LimitPushDown
 
             PlanNode rewrittenSource = context.rewrite(node.getSource());
             if (limit != null) {
-                return new TopNNode(node.getId(), rewrittenSource, limit.getCount(), node.getOrderBy(), node.getOrderings(), TopNNode.Step.SINGLE);
+                return new TopNNode(node.getId(), rewrittenSource, limit.getCount(), node.getOrderingScheme(), TopNNode.Step.SINGLE);
             }
             else if (rewrittenSource != node.getSource()) {
-                return new SortNode(node.getId(), rewrittenSource, node.getOrderBy(), node.getOrderings());
+                return new SortNode(node.getId(), rewrittenSource, node.getOrderingScheme());
             }
             return node;
         }
@@ -213,7 +212,7 @@ public class LimitPushDown
                 sources.add(context.rewrite(node.getSources().get(i), childLimit));
             }
 
-            PlanNode output = new UnionNode(node.getId(), sources, node.getSymbolMapping(), node.getOutputSymbols());
+            PlanNode output = new UnionNode(node.getId(), sources, node.getVariableMapping());
             if (limit != null) {
                 output = new LimitNode(idAllocator.getNextId(), output, limit.getCount(), limit.isPartial());
             }
@@ -229,11 +228,11 @@ public class LimitPushDown
                         node.getId(),
                         source,
                         node.getFilteringSource(),
-                        node.getSourceJoinSymbol(),
-                        node.getFilteringSourceJoinSymbol(),
+                        node.getSourceJoinVariable(),
+                        node.getFilteringSourceJoinVariable(),
                         node.getSemiJoinOutput(),
-                        node.getSourceHashSymbol(),
-                        node.getFilteringSourceHashSymbol(),
+                        node.getSourceHashVariable(),
+                        node.getFilteringSourceHashVariable(),
                         node.getDistributionType());
             }
             return node;

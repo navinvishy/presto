@@ -111,7 +111,7 @@ public class ByteInputStream
     }
 
     public byte next()
-        throws IOException
+            throws IOException
     {
         if (offset == length) {
             readNextBlock();
@@ -124,19 +124,6 @@ public class ByteInputStream
     {
         for (int i = 0; i < items; i++) {
             type.writeLong(builder, next());
-        }
-    }
-
-    public void nextVector(Type type, long items, BlockBuilder builder, boolean[] isNull)
-            throws IOException
-    {
-        for (int i = 0; i < items; i++) {
-            if (isNull[i]) {
-                builder.appendNull();
-            }
-            else {
-                type.writeLong(builder, next());
-            }
         }
     }
 }

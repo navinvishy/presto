@@ -29,13 +29,12 @@ public class TestingResourceGroup
     private Duration softCpuLimit;
     private Duration hardCpuLimit;
     private long quotaGenerationRate;
-    private int maxRunning;
+    private int softConcurrencyLimit;
+    private int hardConcurrencyLimit;
     private int maxQueued;
     private int schedulingWeight;
     private SchedulingPolicy policy;
     private boolean jmxExport;
-    private Duration queuedTimeLimit;
-    private Duration runningTimeLimit;
 
     public TestingResourceGroup(ResourceGroupId id)
     {
@@ -97,15 +96,27 @@ public class TestingResourceGroup
     }
 
     @Override
-    public int getMaxRunningQueries()
+    public int getSoftConcurrencyLimit()
     {
-        return maxRunning;
+        return softConcurrencyLimit;
     }
 
     @Override
-    public void setMaxRunningQueries(int maxRunningQueries)
+    public void setSoftConcurrencyLimit(int softConcurrencyLimit)
     {
-        maxRunning = maxRunningQueries;
+        this.softConcurrencyLimit = softConcurrencyLimit;
+    }
+
+    @Override
+    public int getHardConcurrencyLimit()
+    {
+        return hardConcurrencyLimit;
+    }
+
+    @Override
+    public void setHardConcurrencyLimit(int hardConcurrencyLimit)
+    {
+        this.hardConcurrencyLimit = hardConcurrencyLimit;
     }
 
     @Override
@@ -154,28 +165,5 @@ public class TestingResourceGroup
     public void setJmxExport(boolean export)
     {
         jmxExport = export;
-    }
-    @Override
-    public Duration getQueuedTimeLimit()
-    {
-        return queuedTimeLimit;
-    }
-
-    @Override
-    public void setQueuedTimeLimit(Duration queuedTimeLimit)
-    {
-        this.queuedTimeLimit = queuedTimeLimit;
-    }
-
-    @Override
-    public Duration getRunningTimeLimit()
-    {
-        return runningTimeLimit;
-    }
-
-    @Override
-    public void setRunningTimeLimit(Duration runningTimeLimit)
-    {
-        this.runningTimeLimit = runningTimeLimit;
     }
 }

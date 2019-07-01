@@ -13,54 +13,54 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.Session;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.SymbolAllocator;
-import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.iterative.Pattern;
-import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
-import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.google.common.collect.ImmutableList;
 
 import java.util.Optional;
+import java.util.Set;
 
-import static com.facebook.presto.sql.planner.iterative.rule.Util.pruneInputs;
-import static com.facebook.presto.sql.planner.iterative.rule.Util.restrictChildOutputs;
+import static com.facebook.presto.sql.planner.iterative.rule.Util.restrictOutputs;
+import static com.facebook.presto.sql.planner.plan.Patterns.join;
 
 /**
  * Cross joins don't support output symbol selection, so push the project-off through the node.
  */
 public class PruneCrossJoinColumns
-        implements Rule
+        extends ProjectOffPushDownRule<JoinNode>
 {
-    private static final Pattern PATTERN = Pattern.node(ProjectNode.class);
-
-    @Override
-    public Pattern getPattern()
+    public PruneCrossJoinColumns()
     {
-        return PATTERN;
+        super(join().matching(JoinNode::isCrossJoin));
     }
 
     @Override
-    public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, JoinNode joinNode, Set<VariableReferenceExpression> referencedOutputs)
     {
-        ProjectNode parent = (ProjectNode) node;
+        Optional<PlanNode> newLeft = restrictOutputs(idAllocator, joinNode.getLeft(), referencedOutputs);
+        Optional<PlanNode> newRight = restrictOutputs(idAllocator, joinNode.getRight(), referencedOutputs);
 
-        PlanNode child = lookup.resolve(parent.getSource());
-        if (!(child instanceof JoinNode)) {
+        if (!newLeft.isPresent() && !newRight.isPresent()) {
             return Optional.empty();
         }
 
-        JoinNode joinNode = (JoinNode) child;
-        if (!joinNode.isCrossJoin()) {
-            return Optional.empty();
-        }
+        ImmutableList.Builder<VariableReferenceExpression> outputVariableBuilder = ImmutableList.builder();
+        outputVariableBuilder.addAll(newLeft.orElse(joinNode.getLeft()).getOutputVariables());
+        outputVariableBuilder.addAll(newRight.orElse(joinNode.getRight()).getOutputVariables());
 
-        return pruneInputs(child.getOutputSymbols(), parent.getAssignments().getExpressions())
-                .map(dependencies ->
-                        parent.replaceChildren(ImmutableList.of(
-                                restrictChildOutputs(idAllocator, joinNode, dependencies, dependencies).get())));
+        return Optional.of(new JoinNode(
+                idAllocator.getNextId(),
+                joinNode.getType(),
+                newLeft.orElse(joinNode.getLeft()),
+                newRight.orElse(joinNode.getRight()),
+                joinNode.getCriteria(),
+                outputVariableBuilder.build(),
+                joinNode.getFilter(),
+                joinNode.getLeftHashVariable(),
+                joinNode.getRightHashVariable(),
+                joinNode.getDistributionType()));
     }
 }

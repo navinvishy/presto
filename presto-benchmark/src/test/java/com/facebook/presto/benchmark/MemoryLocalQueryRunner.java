@@ -18,11 +18,15 @@ import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.TaskStateMachine;
 import com.facebook.presto.memory.MemoryPool;
 import com.facebook.presto.memory.QueryContext;
+import com.facebook.presto.metadata.Metadata;
+import com.facebook.presto.metadata.QualifiedObjectName;
 import com.facebook.presto.operator.Driver;
 import com.facebook.presto.operator.TaskContext;
 import com.facebook.presto.plugin.memory.MemoryConnectorFactory;
 import com.facebook.presto.spi.Page;
+import com.facebook.presto.spi.Plugin;
 import com.facebook.presto.spi.QueryId;
+import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.memory.MemoryPoolId;
 import com.facebook.presto.spiller.SpillSpaceTracker;
 import com.facebook.presto.testing.LocalQueryRunner;
@@ -30,20 +34,23 @@ import com.facebook.presto.testing.PageConsumerOperator;
 import com.facebook.presto.tpch.TpchConnectorFactory;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
 import org.intellij.lang.annotations.Language;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
+import java.util.Optional;
+import java.util.OptionalInt;
 
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static org.testng.Assert.assertTrue;
 
 public class MemoryLocalQueryRunner
+        implements AutoCloseable
 {
     protected final LocalQueryRunner localQueryRunner;
-    protected final Session session;
 
     public MemoryLocalQueryRunner()
     {
@@ -57,21 +64,35 @@ public class MemoryLocalQueryRunner
                 .setSchema("default");
         properties.forEach(sessionBuilder::setSystemProperty);
 
-        session = sessionBuilder.build();
-        localQueryRunner = createMemoryLocalQueryRunner(session);
+        localQueryRunner = createMemoryLocalQueryRunner(sessionBuilder.build());
+    }
+
+    public void installPlugin(Plugin plugin)
+    {
+        localQueryRunner.installPlugin(plugin);
     }
 
     public List<Page> execute(@Language("SQL") String query)
     {
-        ExecutorService executor = localQueryRunner.getExecutor();
         MemoryPool memoryPool = new MemoryPool(new MemoryPoolId("test"), new DataSize(2, GIGABYTE));
-        MemoryPool systemMemoryPool = new MemoryPool(new MemoryPoolId("testSystem"), new DataSize(2, GIGABYTE));
-
         SpillSpaceTracker spillSpaceTracker = new SpillSpaceTracker(new DataSize(1, GIGABYTE));
-        TaskContext taskContext = new QueryContext(new QueryId("test"), new DataSize(1, GIGABYTE), memoryPool, systemMemoryPool, executor, new DataSize(4, GIGABYTE), spillSpaceTracker)
-                .addTaskContext(new TaskStateMachine(new TaskId("query", 0, 0), executor),
-                        session,
+        QueryContext queryContext = new QueryContext(
+                new QueryId("test"),
+                new DataSize(1, GIGABYTE),
+                new DataSize(2, GIGABYTE),
+                memoryPool,
+                new TestingGcMonitor(),
+                localQueryRunner.getExecutor(),
+                localQueryRunner.getScheduler(),
+                new DataSize(4, GIGABYTE),
+                spillSpaceTracker);
+
+        TaskContext taskContext = queryContext
+                .addTaskContext(new TaskStateMachine(new TaskId("query", 0, 0), localQueryRunner.getExecutor()),
+                        localQueryRunner.getDefaultSession(),
                         false,
+                        false,
+                        OptionalInt.empty(),
                         false);
 
         // Use NullOutputFactory to avoid coping out results to avoid affecting benchmark results
@@ -108,5 +129,20 @@ public class MemoryLocalQueryRunner
                 ImmutableMap.of("memory.max-data-per-node", "4GB"));
 
         return localQueryRunner;
+    }
+
+    public void dropTable(String tableName)
+    {
+        Session session = localQueryRunner.getDefaultSession();
+        Metadata metadata = localQueryRunner.getMetadata();
+        Optional<TableHandle> tableHandle = metadata.getTableHandle(session, QualifiedObjectName.valueOf(tableName));
+        assertTrue(tableHandle.isPresent(), "Table " + tableName + " does not exist");
+        metadata.dropTable(session, tableHandle.get());
+    }
+
+    @Override
+    public void close()
+    {
+        localQueryRunner.close();
     }
 }

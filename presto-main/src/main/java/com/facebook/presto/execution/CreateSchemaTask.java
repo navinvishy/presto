@@ -14,10 +14,10 @@
 package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.CatalogSchemaName;
+import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.tree.CreateSchema;
@@ -31,6 +31,7 @@ import java.util.Optional;
 
 import static com.facebook.presto.metadata.MetadataUtil.createCatalogSchemaName;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_FOUND;
+import static com.facebook.presto.sql.NodeUtils.mapFromProperties;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.SCHEMA_ALREADY_EXISTS;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 
@@ -72,7 +73,7 @@ public class CreateSchemaTask
         Map<String, Object> properties = metadata.getSchemaPropertyManager().getProperties(
                 connectorId,
                 schema.getCatalogName(),
-                statement.getProperties(),
+                mapFromProperties(statement.getProperties()),
                 session,
                 metadata,
                 parameters);

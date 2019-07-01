@@ -17,6 +17,7 @@ import com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind;
 import com.facebook.presto.orc.metadata.OrcType.OrcTypeKind;
 import com.facebook.presto.orc.metadata.PostScript.HiveWriterVersion;
 import com.facebook.presto.orc.metadata.Stream.StreamKind;
+import com.facebook.presto.orc.metadata.statistics.BinaryStatistics;
 import com.facebook.presto.orc.metadata.statistics.BooleanStatistics;
 import com.facebook.presto.orc.metadata.statistics.ColumnStatistics;
 import com.facebook.presto.orc.metadata.statistics.DoubleStatistics;
@@ -25,26 +26,38 @@ import com.facebook.presto.orc.metadata.statistics.IntegerStatistics;
 import com.facebook.presto.orc.metadata.statistics.StringStatistics;
 import com.facebook.presto.orc.proto.DwrfProto;
 import com.facebook.presto.orc.protobuf.CodedInputStream;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Iterables;
 import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.SortedMap;
 
+import static com.facebook.presto.orc.metadata.CompressionKind.LZ4;
+import static com.facebook.presto.orc.metadata.CompressionKind.NONE;
 import static com.facebook.presto.orc.metadata.CompressionKind.SNAPPY;
-import static com.facebook.presto.orc.metadata.CompressionKind.UNCOMPRESSED;
 import static com.facebook.presto.orc.metadata.CompressionKind.ZLIB;
 import static com.facebook.presto.orc.metadata.CompressionKind.ZSTD;
-import static com.facebook.presto.orc.metadata.OrcMetadataReader.getMaxSlice;
-import static com.facebook.presto.orc.metadata.OrcMetadataReader.getMinSlice;
+import static com.facebook.presto.orc.metadata.DwrfMetadataWriter.STATIC_METADATA;
+import static com.facebook.presto.orc.metadata.OrcMetadataReader.byteStringToSlice;
+import static com.facebook.presto.orc.metadata.OrcMetadataReader.maxStringTruncateToValidRange;
+import static com.facebook.presto.orc.metadata.OrcMetadataReader.minStringTruncateToValidRange;
+import static com.facebook.presto.orc.metadata.PostScript.HiveWriterVersion.ORC_HIVE_8732;
 import static com.facebook.presto.orc.metadata.PostScript.HiveWriterVersion.ORIGINAL;
-import static com.google.common.base.Preconditions.checkArgument;
+import static com.facebook.presto.orc.metadata.statistics.BinaryStatistics.BINARY_VALUE_BYTES_OVERHEAD;
+import static com.facebook.presto.orc.metadata.statistics.BooleanStatistics.BOOLEAN_VALUE_BYTES;
+import static com.facebook.presto.orc.metadata.statistics.DoubleStatistics.DOUBLE_VALUE_BYTES;
+import static com.facebook.presto.orc.metadata.statistics.IntegerStatistics.INTEGER_VALUE_BYTES;
+import static com.facebook.presto.orc.metadata.statistics.StringStatistics.STRING_VALUE_BYTES_OVERHEAD;
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.toIntExact;
 
@@ -58,18 +71,19 @@ public class DwrfMetadataReader
         CodedInputStream input = CodedInputStream.newInstance(data, offset, length);
         DwrfProto.PostScript postScript = DwrfProto.PostScript.parseFrom(input);
 
+        HiveWriterVersion writerVersion = postScript.hasWriterVersion() && postScript.getWriterVersion() > 0 ? ORC_HIVE_8732 : ORIGINAL;
+
         return new PostScript(
                 ImmutableList.of(),
                 postScript.getFooterLength(),
                 0,
                 toCompression(postScript.getCompression()),
                 postScript.getCompressionBlockSize(),
-                ORIGINAL); // DWRF doesn't have the equivalent of Hive writer version, and it is not clear if HIVE-8732 has been fixed
+                writerVersion);
     }
 
     @Override
     public Metadata readMetadata(HiveWriterVersion hiveWriterVersion, InputStream inputStream)
-            throws IOException
     {
         return new Metadata(ImmutableList.of());
     }
@@ -110,7 +124,7 @@ public class DwrfMetadataReader
     }
 
     @Override
-    public StripeFooter readStripeFooter(HiveWriterVersion hiveWriterVersion, List<OrcType> types, InputStream inputStream)
+    public StripeFooter readStripeFooter(List<OrcType> types, InputStream inputStream)
             throws IOException
     {
         CodedInputStream input = CodedInputStream.newInstance(inputStream);
@@ -120,7 +134,7 @@ public class DwrfMetadataReader
 
     private static Stream toStream(DwrfProto.Stream stream)
     {
-        return new Stream(stream.getColumn(), toStreamKind(stream.getKind()), toIntExact(stream.getLength()), stream.getUseVInts());
+        return new Stream(stream.getColumn(), toStreamKind(stream.getKind()), toIntExact(stream.getLength()), stream.getUseVInts(), stream.getSequence());
     }
 
     private static List<Stream> toStream(List<DwrfProto.Stream> streams)
@@ -128,21 +142,61 @@ public class DwrfMetadataReader
         return ImmutableList.copyOf(Iterables.transform(streams, DwrfMetadataReader::toStream));
     }
 
-    private static ColumnEncoding toColumnEncoding(OrcTypeKind type, DwrfProto.ColumnEncoding columnEncoding)
+    private static DwrfSequenceEncoding toSequenceEncoding(OrcType type, DwrfProto.ColumnEncoding columnEncoding)
     {
-        return new ColumnEncoding(toColumnEncodingKind(type, columnEncoding.getKind()), columnEncoding.getDictionarySize());
+        return new DwrfSequenceEncoding(
+                columnEncoding.getKey(),
+                new ColumnEncoding(
+                        toColumnEncodingKind(type.getOrcTypeKind(), columnEncoding.getKind()),
+                        columnEncoding.getDictionarySize()));
+    }
+
+    private static Optional<SortedMap<Integer, DwrfSequenceEncoding>> toAdditionalSequenceEncodings(List<DwrfProto.ColumnEncoding> columnEncodings, OrcType type)
+    {
+        if (columnEncodings.size() == 1) {
+            return Optional.empty();
+        }
+
+        ImmutableSortedMap.Builder<Integer, DwrfSequenceEncoding> additionalSequenceEncodings = ImmutableSortedMap.<Integer, DwrfSequenceEncoding>naturalOrder();
+
+        for (int i = 1; i < columnEncodings.size(); i++) {
+            DwrfProto.ColumnEncoding columnEncoding = columnEncodings.get(i);
+            additionalSequenceEncodings.put(columnEncoding.getSequence(), toSequenceEncoding(type, columnEncoding));
+        }
+
+        return Optional.of(additionalSequenceEncodings.build());
     }
 
     private static List<ColumnEncoding> toColumnEncoding(List<OrcType> types, List<DwrfProto.ColumnEncoding> columnEncodings)
     {
-        checkArgument(types.size() == columnEncodings.size());
+        Map<Integer, List<DwrfProto.ColumnEncoding>> groupedColumnEncodings = new HashMap<>(columnEncodings.size());
 
-        ImmutableList.Builder<ColumnEncoding> encodings = ImmutableList.builder();
-        for (int i = 0; i < types.size(); i++) {
-            OrcType type = types.get(i);
-            encodings.add(toColumnEncoding(type.getOrcTypeKind(), columnEncodings.get(i)));
+        for (int i = 0; i < columnEncodings.size(); i++) {
+            DwrfProto.ColumnEncoding columnEncoding = columnEncodings.get(i);
+            int column = columnEncoding.getColumn();
+
+            // DWRF prior to version 6.0.8 doesn't set the value of column, infer it from the index
+            if (!columnEncoding.hasColumn()) {
+                column = i;
+            }
+
+            groupedColumnEncodings.computeIfAbsent(column, key -> new ArrayList<>()).add(columnEncoding);
         }
-        return encodings.build();
+
+        ImmutableList.Builder<ColumnEncoding> resultBuilder = ImmutableList.builder();
+
+        for (Map.Entry<Integer, List<DwrfProto.ColumnEncoding>> entry : groupedColumnEncodings.entrySet()) {
+            OrcType type = types.get(entry.getKey());
+
+            DwrfProto.ColumnEncoding columnEncoding = entry.getValue().get(0);
+            resultBuilder.add(
+                    new ColumnEncoding(
+                            toColumnEncodingKind(type.getOrcTypeKind(), columnEncoding.getKind()),
+                            columnEncoding.getDictionarySize(),
+                            toAdditionalSequenceEncodings(entry.getValue(), type)));
+        }
+
+        return resultBuilder.build();
     }
 
     @Override
@@ -156,7 +210,6 @@ public class DwrfMetadataReader
 
     @Override
     public List<HiveBloomFilter> readBloomFilterIndexes(InputStream inputStream)
-            throws IOException
     {
         // DWRF does not have bloom filters
         return ImmutableList.of();
@@ -189,21 +242,53 @@ public class DwrfMetadataReader
     {
         ImmutableMap.Builder<String, Slice> mapBuilder = ImmutableMap.builder();
         for (DwrfProto.UserMetadataItem item : metadataList) {
-            mapBuilder.put(item.getName(), Slices.wrappedBuffer(item.getValue().toByteArray()));
+            // skip static metadata added by the writer framework
+            if (!STATIC_METADATA.containsKey(item.getName())) {
+                mapBuilder.put(item.getName(), byteStringToSlice(item.getValue()));
+            }
         }
         return mapBuilder.build();
     }
 
     private static ColumnStatistics toColumnStatistics(HiveWriterVersion hiveWriterVersion, DwrfProto.ColumnStatistics statistics, boolean isRowGroup)
     {
+        long minAverageValueBytes;
+        if (statistics.hasBucketStatistics()) {
+            minAverageValueBytes = BOOLEAN_VALUE_BYTES;
+        }
+        else if (statistics.hasIntStatistics()) {
+            minAverageValueBytes = INTEGER_VALUE_BYTES;
+        }
+        else if (statistics.hasDoubleStatistics()) {
+            minAverageValueBytes = DOUBLE_VALUE_BYTES;
+        }
+        else if (statistics.hasStringStatistics()) {
+            minAverageValueBytes = STRING_VALUE_BYTES_OVERHEAD;
+            if (statistics.hasNumberOfValues() && statistics.getNumberOfValues() > 0) {
+                minAverageValueBytes += statistics.getStringStatistics().getSum() / statistics.getNumberOfValues();
+            }
+        }
+        else if (statistics.hasBinaryStatistics()) {
+            // offset and value length
+            minAverageValueBytes = BINARY_VALUE_BYTES_OVERHEAD;
+            if (statistics.hasNumberOfValues() && statistics.getNumberOfValues() > 0) {
+                minAverageValueBytes += statistics.getBinaryStatistics().getSum() / statistics.getNumberOfValues();
+            }
+        }
+        else {
+            minAverageValueBytes = 0;
+        }
+
         return new ColumnStatistics(
                 statistics.getNumberOfValues(),
-                toBooleanStatistics(statistics.getBucketStatistics()),
-                toIntegerStatistics(statistics.getIntStatistics()),
-                toDoubleStatistics(statistics.getDoubleStatistics()),
-                toStringStatistics(hiveWriterVersion, statistics.getStringStatistics(), isRowGroup),
+                minAverageValueBytes,
+                statistics.hasBucketStatistics() ? toBooleanStatistics(statistics.getBucketStatistics()) : null,
+                statistics.hasIntStatistics() ? toIntegerStatistics(statistics.getIntStatistics()) : null,
+                statistics.hasDoubleStatistics() ? toDoubleStatistics(statistics.getDoubleStatistics()) : null,
+                statistics.hasStringStatistics() ? toStringStatistics(hiveWriterVersion, statistics.getStringStatistics(), isRowGroup) : null,
                 null,
                 null,
+                statistics.hasBinaryStatistics() ? toBinaryStatistics(statistics.getBinaryStatistics()) : null,
                 null);
     }
 
@@ -218,21 +303,14 @@ public class DwrfMetadataReader
 
     private static IntegerStatistics toIntegerStatistics(DwrfProto.IntegerStatistics integerStatistics)
     {
-        if (!integerStatistics.hasMinimum() && !integerStatistics.hasMaximum()) {
-            return null;
-        }
-
         return new IntegerStatistics(
                 integerStatistics.hasMinimum() ? integerStatistics.getMinimum() : null,
-                integerStatistics.hasMaximum() ? integerStatistics.getMaximum() : null);
+                integerStatistics.hasMaximum() ? integerStatistics.getMaximum() : null,
+                integerStatistics.hasSum() ? integerStatistics.getSum() : null);
     }
 
     private static DoubleStatistics toDoubleStatistics(DwrfProto.DoubleStatistics doubleStatistics)
     {
-        if (!doubleStatistics.hasMinimum() && !doubleStatistics.hasMaximum()) {
-            return null;
-        }
-
         // if either min, max, or sum is NaN, ignore the stat
         if ((doubleStatistics.hasMinimum() && Double.isNaN(doubleStatistics.getMinimum())) ||
                 (doubleStatistics.hasMaximum() && Double.isNaN(doubleStatistics.getMaximum())) ||
@@ -245,25 +323,32 @@ public class DwrfMetadataReader
                 doubleStatistics.hasMaximum() ? doubleStatistics.getMaximum() : null);
     }
 
-    private static StringStatistics toStringStatistics(HiveWriterVersion hiveWriterVersion, DwrfProto.StringStatistics stringStatistics, boolean isRowGroup)
+    @VisibleForTesting
+    static StringStatistics toStringStatistics(HiveWriterVersion hiveWriterVersion, DwrfProto.StringStatistics stringStatistics, boolean isRowGroup)
     {
         if (hiveWriterVersion == ORIGINAL && !isRowGroup) {
             return null;
         }
 
-        if (!stringStatistics.hasMinimum() && !stringStatistics.hasMaximum()) {
+        Slice maximum = stringStatistics.hasMaximum() ? maxStringTruncateToValidRange(byteStringToSlice(stringStatistics.getMaximumBytes()), hiveWriterVersion) : null;
+        Slice minimum = stringStatistics.hasMinimum() ? minStringTruncateToValidRange(byteStringToSlice(stringStatistics.getMinimumBytes()), hiveWriterVersion) : null;
+        long sum = stringStatistics.hasSum() ? stringStatistics.getSum() : 0;
+
+        return new StringStatistics(minimum, maximum, sum);
+    }
+
+    private static BinaryStatistics toBinaryStatistics(DwrfProto.BinaryStatistics binaryStatistics)
+    {
+        if (!binaryStatistics.hasSum()) {
             return null;
         }
 
-        Slice minimum = stringStatistics.hasMinimum() ? getMinSlice(stringStatistics.getMinimum()) : null;
-        Slice maximum = stringStatistics.hasMaximum() ? getMaxSlice(stringStatistics.getMaximum()) : null;
-
-        return new StringStatistics(minimum, maximum);
+        return new BinaryStatistics(binaryStatistics.getSum());
     }
 
     private static OrcType toType(DwrfProto.Type type)
     {
-        return new OrcType(toTypeKind(type.getKind()), type.getSubtypesList(), type.getFieldNamesList(), Optional.empty(), Optional.empty());
+        return new OrcType(toTypeKind(type.getKind()), type.getSubtypesList(), type.getFieldNamesList(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     private static List<OrcType> toType(List<DwrfProto.Type> types)
@@ -330,6 +415,8 @@ public class DwrfMetadataReader
                 return StreamKind.ROW_GROUP_DICTIONARY;
             case STRIDE_DICTIONARY_LENGTH:
                 return StreamKind.ROW_GROUP_DICTIONARY_LENGTH;
+            case IN_MAP:
+                return StreamKind.IN_MAP;
             default:
                 throw new IllegalArgumentException(kind + " stream type not implemented yet");
         }
@@ -347,6 +434,8 @@ public class DwrfMetadataReader
                 }
             case DICTIONARY:
                 return ColumnEncodingKind.DICTIONARY;
+            case MAP_FLAT:
+                return ColumnEncodingKind.DWRF_MAP_FLAT;
             default:
                 throw new IllegalArgumentException(kind + " stream encoding not implemented yet");
         }
@@ -356,11 +445,13 @@ public class DwrfMetadataReader
     {
         switch (compression) {
             case NONE:
-                return UNCOMPRESSED;
+                return NONE;
             case ZLIB:
                 return ZLIB;
             case SNAPPY:
                 return SNAPPY;
+            case LZ4:
+                return LZ4;
             case ZSTD:
                 return ZSTD;
             default:

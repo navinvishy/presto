@@ -38,7 +38,7 @@ public class DoubleInputStream
     @Override
     public Class<DoubleStreamCheckpoint> getCheckpointType()
     {
-       return DoubleStreamCheckpoint.class;
+        return DoubleStreamCheckpoint.class;
     }
 
     @Override
@@ -68,19 +68,6 @@ public class DoubleInputStream
     {
         for (int i = 0; i < items; i++) {
             type.writeDouble(builder, next());
-        }
-    }
-
-    public void nextVector(Type type, long items, BlockBuilder builder, boolean[] isNull)
-            throws IOException
-    {
-        for (int i = 0; i < items; i++) {
-            if (isNull[i]) {
-                builder.appendNull();
-            }
-            else {
-                type.writeDouble(builder, next());
-            }
         }
     }
 }

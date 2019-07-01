@@ -30,7 +30,6 @@ import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import org.apache.accumulo.core.client.BatchScanner;
 import org.apache.accumulo.core.client.Connector;
-import org.apache.accumulo.core.client.Scanner;
 import org.apache.accumulo.core.client.TableNotFoundException;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.PartialKey;
@@ -40,7 +39,6 @@ import org.apache.accumulo.core.security.Authorizations;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.io.Text;
 
-import javax.annotation.Nonnull;
 import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 
@@ -126,16 +124,14 @@ public class ColumnCardinalityCache
      * @throws ExecutionException If another error occurs; I really don't even know anymore.
      */
     public Multimap<Long, AccumuloColumnConstraint> getCardinalities(String schema, String table, Authorizations auths, Multimap<AccumuloColumnConstraint, Range> idxConstraintRangePairs, long earlyReturnThreshold, Duration pollingDuration)
-            throws ExecutionException, TableNotFoundException
     {
         // Submit tasks to the executor to fetch column cardinality, adding it to the Guava cache if necessary
         CompletionService<Pair<Long, AccumuloColumnConstraint>> executor = new ExecutorCompletionService<>(executorService);
         idxConstraintRangePairs.asMap().forEach((key, value) -> executor.submit(() -> {
-                    long cardinality = getColumnCardinality(schema, table, auths, key.getFamily(), key.getQualifier(), value);
-                    LOG.debug("Cardinality for column %s is %s", key.getName(), cardinality);
-                    return Pair.of(cardinality, key);
-                }
-        ));
+            long cardinality = getColumnCardinality(schema, table, auths, key.getFamily(), key.getQualifier(), value);
+            LOG.debug("Cardinality for column %s is %s", key.getName(), cardinality);
+            return Pair.of(cardinality, key);
+        }));
 
         // Create a multi map sorted by cardinality
         ListMultimap<Long, AccumuloColumnConstraint> cardinalityToConstraints = MultimapBuilder.treeKeys().arrayListValues().build();
@@ -337,7 +333,7 @@ public class ColumnCardinalityCache
          * @return The cardinality of the column, which would be zero if the value does not exist
          */
         @Override
-        public Long load(@Nonnull CacheKey key)
+        public Long load(CacheKey key)
                 throws Exception
         {
             LOG.debug("Loading a non-exact range from Accumulo: %s", key);
@@ -346,8 +342,8 @@ public class ColumnCardinalityCache
             Text columnFamily = new Text(getIndexColumnFamily(key.getFamily().getBytes(UTF_8), key.getQualifier().getBytes(UTF_8)).array());
 
             // Create scanner for querying the range
-            Scanner scanner = connector.createScanner(metricsTable, key.getAuths());
-            scanner.setRange(key.getRange());
+            BatchScanner scanner = connector.createBatchScanner(metricsTable, key.auths, 10);
+            scanner.setRanges(connector.tableOperations().splitRangeByTablets(metricsTable, key.range, Integer.MAX_VALUE));
             scanner.fetchColumn(columnFamily, CARDINALITY_CQ_AS_TEXT);
 
             try {
@@ -363,7 +359,7 @@ public class ColumnCardinalityCache
         }
 
         @Override
-        public Map<CacheKey, Long> loadAll(@Nonnull Iterable<? extends CacheKey> keys)
+        public Map<CacheKey, Long> loadAll(Iterable<? extends CacheKey> keys)
                 throws Exception
         {
             int size = Iterables.size(keys);

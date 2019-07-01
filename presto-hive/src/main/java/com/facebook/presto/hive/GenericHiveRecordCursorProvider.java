@@ -47,21 +47,22 @@ public class GenericHiveRecordCursorProvider
 
     @Override
     public Optional<RecordCursor> createRecordCursor(
-            String clientId,
             Configuration configuration,
             ConnectorSession session,
             Path path,
             long start,
             long length,
+            long fileSize,
             Properties schema,
             List<HiveColumnHandle> columns,
             TupleDomain<HiveColumnHandle> effectivePredicate,
             DateTimeZone hiveStorageTimeZone,
-            TypeManager typeManager)
+            TypeManager typeManager,
+            boolean s3SelectPushdownEnabled)
     {
         // make sure the FileSystem is created with the proper Configuration object
         try {
-            this.hdfsEnvironment.getFileSystem(session.getUser(), path);
+            this.hdfsEnvironment.getFileSystem(session.getUser(), path, configuration);
         }
         catch (IOException e) {
             throw new PrestoException(HIVE_FILESYSTEM_ERROR, "Failed getting FileSystem: " + path, e);
@@ -71,6 +72,8 @@ public class GenericHiveRecordCursorProvider
                 () -> HiveUtil.createRecordReader(configuration, path, start, length, schema, columns));
 
         return Optional.of(new GenericHiveRecordCursor<>(
+                configuration,
+                path,
                 genericRecordReader(recordReader),
                 length,
                 schema,

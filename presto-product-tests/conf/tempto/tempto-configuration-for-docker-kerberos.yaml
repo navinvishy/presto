@@ -18,9 +18,14 @@ databases:
     kerberos_principal: hdfs/hadoop-master@LABS.TERADATA.COM
     kerberos_keytab: /etc/hadoop/conf/hdfs.keytab
 
+    inject_stats_for_immutable_tables: false
+    inject_stats_for_mutable_tables: false
+
   presto:
     host: presto-master.docker.cluster
     port: 7778
+    http_port: 8080
+    https_port: ${databases.presto.port}
     server_address: https://${databases.presto.host}:${databases.presto.port}
 
     # jdbc_user in here should satisfy two requirements in order to pass SQL standard access control checks in Presto:

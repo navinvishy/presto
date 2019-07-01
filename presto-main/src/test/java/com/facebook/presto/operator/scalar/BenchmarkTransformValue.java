@@ -14,21 +14,21 @@
 
 package com.facebook.presto.operator.scalar;
 
-import com.facebook.presto.metadata.FunctionKind;
+import com.facebook.presto.metadata.FunctionManager;
 import com.facebook.presto.metadata.MetadataManager;
-import com.facebook.presto.metadata.Signature;
+import com.facebook.presto.operator.DriverYieldSignal;
 import com.facebook.presto.operator.project.PageProcessor;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
-import com.facebook.presto.spi.block.InterleavedBlockBuilder;
+import com.facebook.presto.spi.function.FunctionHandle;
+import com.facebook.presto.spi.relation.LambdaDefinitionExpression;
+import com.facebook.presto.spi.relation.RowExpression;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.spi.type.MapType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.gen.ExpressionCompiler;
-import com.facebook.presto.sql.relational.LambdaDefinitionExpression;
-import com.facebook.presto.sql.relational.RowExpression;
-import com.facebook.presto.sql.relational.VariableReferenceExpression;
+import com.facebook.presto.sql.gen.PageFunctionCompiler;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -49,10 +49,12 @@ import org.openjdk.jmh.runner.options.OptionsBuilder;
 import org.openjdk.jmh.runner.options.VerboseMode;
 import org.openjdk.jmh.runner.options.WarmupMode;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
+import static com.facebook.presto.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static com.facebook.presto.spi.function.OperatorType.GREATER_THAN;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
@@ -60,6 +62,8 @@ import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.spi.type.TypeUtils.writeNativeValue;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
+import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
+import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.sql.relational.Expressions.call;
 import static com.facebook.presto.sql.relational.Expressions.constant;
 import static com.facebook.presto.sql.relational.Expressions.field;
@@ -81,10 +85,14 @@ public class BenchmarkTransformValue
 
     @Benchmark
     @OperationsPerInvocation(POSITIONS * NUM_TYPES)
-    public Object benchmark(BenchmarkData data)
-            throws Throwable
+    public List<Optional<Page>> benchmark(BenchmarkData data)
     {
-        return data.getPageProcessor().process(SESSION, data.getPage());
+        return ImmutableList.copyOf(
+                data.getPageProcessor().process(
+                        SESSION,
+                        new DriverYieldSignal(),
+                        newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
+                        data.getPage()));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -102,7 +110,8 @@ public class BenchmarkTransformValue
         public void setup()
         {
             MetadataManager metadata = MetadataManager.createTestMetadataManager();
-            ExpressionCompiler compiler = new ExpressionCompiler(metadata);
+            FunctionManager functionManager = metadata.getFunctionManager();
+            ExpressionCompiler compiler = new ExpressionCompiler(metadata, new PageFunctionCompiler(metadata, 0));
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Type elementType;
             Object compareValue;
@@ -124,24 +133,22 @@ public class BenchmarkTransformValue
             }
             MapType mapType = mapType(elementType, elementType);
             MapType returnType = mapType(elementType, BOOLEAN);
-            Signature signature = new Signature(
+            FunctionHandle functionHandle = functionManager.lookupFunction(
                     name,
-                    FunctionKind.SCALAR,
-                    returnType.getTypeSignature(),
-                    mapType.getTypeSignature(),
-                    parseTypeSignature(format("function(%s, %s, boolean)", type, type)));
-            Signature greaterThan = new Signature(
-                    "$operator$" + GREATER_THAN.name(),
-                    FunctionKind.SCALAR,
-                    BOOLEAN.getTypeSignature(),
-                    elementType.getTypeSignature(),
-                    elementType.getTypeSignature());
-            projectionsBuilder.add(call(signature, returnType, ImmutableList.of(
+                    fromTypeSignatures(
+                            mapType.getTypeSignature(),
+                            parseTypeSignature(format("function(%s, %s, boolean)", type, type))));
+            FunctionHandle greaterThan = metadata.getFunctionManager().resolveOperator(
+                    GREATER_THAN,
+                    fromTypes(elementType, elementType));
+            projectionsBuilder.add(call(name, functionHandle, returnType, ImmutableList.of(
                     field(0, mapType),
                     new LambdaDefinitionExpression(
                             ImmutableList.of(elementType, elementType),
                             ImmutableList.of("x", "y"),
-                            call(greaterThan, BOOLEAN, ImmutableList.of(
+                            call(
+                                    GREATER_THAN.name(),
+                                    greaterThan, BOOLEAN, ImmutableList.of(
                                     new VariableReferenceExpression("y", elementType),
                                     constant(compareValue, elementType)))))));
             Block block = createChannel(POSITIONS, mapType, elementType);
@@ -153,8 +160,8 @@ public class BenchmarkTransformValue
 
         private static Block createChannel(int positionCount, MapType mapType, Type elementType)
         {
-            BlockBuilder mapArrayBuilder = mapType.createBlockBuilder(new BlockBuilderStatus(), 1);
-            BlockBuilder mapBuilder = new InterleavedBlockBuilder(ImmutableList.of(mapType.getKeyType(), mapType.getValueType()), new BlockBuilderStatus(), positionCount * 2);
+            BlockBuilder mapBlockBuilder = mapType.createBlockBuilder(null, 1);
+            BlockBuilder singleMapBlockWriter = mapBlockBuilder.beginBlockEntry();
             Object key;
             Object value;
             for (int position = 0; position < positionCount; position++) {
@@ -174,11 +181,11 @@ public class BenchmarkTransformValue
                     throw new UnsupportedOperationException();
                 }
                 // Use position as the key to avoid collision
-                writeNativeValue(elementType, mapBuilder, key);
-                writeNativeValue(elementType, mapBuilder, value);
+                writeNativeValue(elementType, singleMapBlockWriter, key);
+                writeNativeValue(elementType, singleMapBlockWriter, value);
             }
-            mapType.writeObject(mapArrayBuilder, mapBuilder.build());
-            return mapArrayBuilder.build();
+            mapBlockBuilder.closeEntry();
+            return mapBlockBuilder.build();
         }
 
         public PageProcessor getPageProcessor()

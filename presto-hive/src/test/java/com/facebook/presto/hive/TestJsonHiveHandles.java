@@ -17,6 +17,7 @@ import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.ObjectMapperProvider;
 import org.testng.annotations.Test;
@@ -35,18 +36,17 @@ import static org.testng.Assert.assertTrue;
 public class TestJsonHiveHandles
 {
     private static final Map<String, Object> TABLE_HANDLE_AS_MAP = ImmutableMap.of(
-            "clientId", "hive",
             "schemaName", "hive_schema",
             "tableName", "hive_table");
 
     private static final Map<String, Object> COLUMN_HANDLE_AS_MAP = ImmutableMap.<String, Object>builder()
-            .put("clientId", "hive")
             .put("name", "column")
             .put("hiveType", "float")
             .put("typeSignature", "double")
             .put("hiveColumnIndex", -1)
             .put("columnType", PARTITION_KEY.toString())
             .put("comment", "comment")
+            .put("requiredSubfields", ImmutableList.of())
             .build();
 
     private final ObjectMapper objectMapper = new ObjectMapperProvider().get();
@@ -55,7 +55,7 @@ public class TestJsonHiveHandles
     public void testTableHandleSerialize()
             throws Exception
     {
-        HiveTableHandle tableHandle = new HiveTableHandle("hive", "hive_schema", "hive_table");
+        HiveTableHandle tableHandle = new HiveTableHandle("hive_schema", "hive_table");
 
         assertTrue(objectMapper.canSerialize(HiveTableHandle.class));
         String json = objectMapper.writeValueAsString(tableHandle);
@@ -70,7 +70,6 @@ public class TestJsonHiveHandles
 
         HiveTableHandle tableHandle = objectMapper.readValue(json, HiveTableHandle.class);
 
-        assertEquals(tableHandle.getClientId(), "hive");
         assertEquals(tableHandle.getSchemaName(), "hive_schema");
         assertEquals(tableHandle.getTableName(), "hive_table");
         assertEquals(tableHandle.getSchemaTableName(), new SchemaTableName("hive_schema", "hive_table"));
@@ -80,7 +79,7 @@ public class TestJsonHiveHandles
     public void testColumnHandleSerialize()
             throws Exception
     {
-        HiveColumnHandle columnHandle = new HiveColumnHandle("hive", "column", HiveType.HIVE_FLOAT, parseTypeSignature(StandardTypes.DOUBLE), -1, PARTITION_KEY, Optional.of("comment"));
+        HiveColumnHandle columnHandle = new HiveColumnHandle("column", HiveType.HIVE_FLOAT, parseTypeSignature(StandardTypes.DOUBLE), -1, PARTITION_KEY, Optional.of("comment"));
 
         assertTrue(objectMapper.canSerialize(HiveColumnHandle.class));
         String json = objectMapper.writeValueAsString(columnHandle);
@@ -95,7 +94,6 @@ public class TestJsonHiveHandles
 
         HiveColumnHandle columnHandle = objectMapper.readValue(json, HiveColumnHandle.class);
 
-        assertEquals(columnHandle.getClientId(), "hive");
         assertEquals(columnHandle.getName(), "column");
         assertEquals(columnHandle.getTypeSignature(), DOUBLE.getTypeSignature());
         assertEquals(columnHandle.getHiveType(), HiveType.HIVE_FLOAT);

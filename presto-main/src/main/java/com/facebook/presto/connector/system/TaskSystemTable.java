@@ -59,7 +59,6 @@ public class TaskSystemTable
 
             .column("split_scheduled_time_ms", BIGINT)
             .column("split_cpu_time_ms", BIGINT)
-            .column("split_user_time_ms", BIGINT)
             .column("split_blocked_time_ms", BIGINT)
 
             .column("raw_input_bytes", BIGINT)
@@ -70,6 +69,8 @@ public class TaskSystemTable
 
             .column("output_bytes", BIGINT)
             .column("output_rows", BIGINT)
+
+            .column("physical_written_bytes", BIGINT)
 
             .column("created", TIMESTAMP)
             .column("start", TIMESTAMP)
@@ -121,7 +122,6 @@ public class TaskSystemTable
 
                     toMillis(stats.getTotalScheduledTime()),
                     toMillis(stats.getTotalCpuTime()),
-                    toMillis(stats.getTotalUserTime()),
                     toMillis(stats.getTotalBlockedTime()),
 
                     toBytes(stats.getRawInputDataSize()),
@@ -132,6 +132,8 @@ public class TaskSystemTable
 
                     toBytes(stats.getOutputDataSize()),
                     stats.getOutputPositions(),
+
+                    toBytes(stats.getPhysicalWrittenDataSize()),
 
                     toTimeStamp(stats.getCreateTime()),
                     toTimeStamp(stats.getFirstStartTime()),

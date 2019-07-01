@@ -17,7 +17,6 @@ import com.facebook.presto.sql.tree.AliasedRelation;
 import com.facebook.presto.sql.tree.AllColumns;
 import com.facebook.presto.sql.tree.CoalesceExpression;
 import com.facebook.presto.sql.tree.ComparisonExpression;
-import com.facebook.presto.sql.tree.ComparisonExpressionType;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.GroupBy;
@@ -44,17 +43,24 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static com.facebook.presto.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static com.facebook.presto.sql.tree.BooleanLiteral.TRUE_LITERAL;
+import static java.util.Arrays.asList;
 
 public final class QueryUtil
 {
     private QueryUtil() {}
 
-    public static Expression identifier(String name)
+    public static Identifier identifier(String name)
     {
         return new Identifier(name);
+    }
+
+    public static Identifier quotedIdentifier(String name)
+    {
+        return new Identifier(name, true);
     }
 
     public static SelectItem unaliasedName(String name)
@@ -64,10 +70,15 @@ public final class QueryUtil
 
     public static SelectItem aliasedName(String name, String alias)
     {
-        return new SingleColumn(identifier(name), alias);
+        return new SingleColumn(identifier(name), identifier(alias));
     }
 
     public static Select selectList(Expression... expressions)
+    {
+        return selectList(asList(expressions));
+    }
+
+    public static Select selectList(List<Expression> expressions)
     {
         ImmutableList.Builder<SelectItem> items = ImmutableList.builder();
         for (Expression expression : expressions) {
@@ -103,12 +114,12 @@ public final class QueryUtil
 
     public static Expression logicalAnd(Expression left, Expression right)
     {
-        return new LogicalBinaryExpression(LogicalBinaryExpression.Type.AND, left, right);
+        return new LogicalBinaryExpression(LogicalBinaryExpression.Operator.AND, left, right);
     }
 
     public static Expression equal(Expression left, Expression right)
     {
-        return new ComparisonExpression(ComparisonExpressionType.EQUAL, left, right);
+        return new ComparisonExpression(ComparisonExpression.Operator.EQUAL, left, right);
     }
 
     public static Expression caseWhen(Expression operand, Expression result)
@@ -133,12 +144,17 @@ public final class QueryUtil
 
     public static Relation aliased(Relation relation, String alias, List<String> columnAliases)
     {
-        return new AliasedRelation(relation, alias, columnAliases);
+        return new AliasedRelation(
+                relation,
+                identifier(alias),
+                columnAliases.stream()
+                        .map(QueryUtil::identifier)
+                        .collect(Collectors.toList()));
     }
 
     public static SelectItem aliasedNullToEmpty(String column, String alias)
     {
-        return new SingleColumn(new CoalesceExpression(identifier(column), new StringLiteral("")), alias);
+        return new SingleColumn(new CoalesceExpression(identifier(column), new StringLiteral("")), identifier(alias));
     }
 
     public static OrderBy ordering(SortItem... items)

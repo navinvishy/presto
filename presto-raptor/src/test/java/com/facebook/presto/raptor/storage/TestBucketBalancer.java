@@ -14,7 +14,7 @@
 package com.facebook.presto.raptor.storage;
 
 import com.facebook.presto.client.NodeVersion;
-import com.facebook.presto.metadata.PrestoNode;
+import com.facebook.presto.metadata.InternalNode;
 import com.facebook.presto.raptor.NodeSupplier;
 import com.facebook.presto.raptor.metadata.BucketNode;
 import com.facebook.presto.raptor.metadata.ColumnInfo;
@@ -66,7 +66,6 @@ public class TestBucketBalancer
 
     @BeforeMethod
     public void setup()
-            throws Exception
     {
         TypeRegistry typeRegistry = new TypeRegistry();
         dbi = new DBI("jdbc:h2:mem:test" + System.nanoTime());
@@ -81,7 +80,7 @@ public class TestBucketBalancer
 
         NodeSupplier nodeSupplier = nodeManager::getWorkerNodes;
         shardManager = createShardManager(dbi, nodeSupplier);
-        balancer = new BucketBalancer(nodeSupplier, shardManager, true, new Duration(1, DAYS), true, true, "test");
+        balancer = new BucketBalancer(nodeSupplier, shardManager, true, new Duration(1, DAYS), 0, true, true, "test");
     }
 
     @AfterMethod(alwaysRun = true)
@@ -94,7 +93,6 @@ public class TestBucketBalancer
 
     @Test
     public void testSingleDistributionUnbalanced()
-            throws Exception
     {
         long distributionId = createDistribution("distA", 16);
         createBucketedTable("testA", distributionId);
@@ -107,7 +105,6 @@ public class TestBucketBalancer
 
     @Test
     public void testSingleDistributionSlightlyUnbalanced()
-            throws Exception
     {
         long distributionId = createDistribution("distA", 16);
         createBucketedTable("testA", distributionId);
@@ -120,7 +117,6 @@ public class TestBucketBalancer
 
     @Test
     public void testSingleDistributionBalanced()
-            throws Exception
     {
         long distributionId = createDistribution("distA", 16);
         createBucketedTable("testA", distributionId);
@@ -133,7 +129,6 @@ public class TestBucketBalancer
 
     @Test
     public void testSingleDistributionUnbalancedWithDeadNode()
-            throws Exception
     {
         long distributionId = createDistribution("distA", 16);
         createBucketedTable("testA", distributionId);
@@ -147,7 +142,6 @@ public class TestBucketBalancer
 
     @Test
     public void testSingleDistributionUnbalancedWithNewNode()
-            throws Exception
     {
         long distributionId = createDistribution("distA", 16);
         createBucketedTable("testA", distributionId);
@@ -161,7 +155,6 @@ public class TestBucketBalancer
 
     @Test
     public void testMultipleDistributionUnbalanced()
-            throws Exception
     {
         long distributionA = createDistribution("distA", 17);
         createBucketedTable("testA", distributionA);
@@ -180,7 +173,6 @@ public class TestBucketBalancer
 
     @Test
     public void testMultipleDistributionUnbalancedWithDiskSpace()
-            throws Exception
     {
         long distributionA = createDistribution("distA", 4);
         createBucketedTable("testA", distributionA, DataSize.valueOf("4B"));
@@ -204,7 +196,6 @@ public class TestBucketBalancer
 
     @Test
     public void testMultipleDistributionUnbalancedWithDiskSpace2()
-            throws Exception
     {
         long distributionA = createDistribution("distA", 4);
         createBucketedTable("testA", distributionA, DataSize.valueOf("4B"));
@@ -219,7 +210,6 @@ public class TestBucketBalancer
 
     @Test
     public void testMultipleDistributionUnbalancedWorstCase()
-            throws Exception
     {
         // we will end up with only one bucket on node1
         long distributionA = createDistribution("distA", 4);
@@ -316,6 +306,6 @@ public class TestBucketBalancer
 
     private static Node createTestingNode(String nodeIdentifier)
     {
-        return new PrestoNode(nodeIdentifier, URI.create("http://test"), NodeVersion.UNKNOWN, false);
+        return new InternalNode(nodeIdentifier, URI.create("http://test"), NodeVersion.UNKNOWN, false);
     }
 }

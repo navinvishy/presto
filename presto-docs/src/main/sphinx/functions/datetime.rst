@@ -53,6 +53,10 @@ Date and Time Functions
     Returns the current time zone in the format defined by IANA
     (e.g., ``America/Los_Angeles``) or as fixed offset from UTC (e.g., ``+08:35``)
 
+.. function:: date(x) -> date
+
+    This is an alias for ``CAST(x AS date)``.
+
 .. function:: from_iso8601_timestamp(string) -> timestamp with time zone
 
     Parses the ISO 8601 formatted ``string`` into a ``timestamp with time zone``.
@@ -91,6 +95,10 @@ Date and Time Functions
 
     Formats ``x`` as an ISO 8601 string. ``x`` can be date, timestamp, or
     timestamp with time zone.
+
+.. function:: to_milliseconds(interval) -> bigint
+
+    Returns the day-to-second ``interval`` as milliseconds.
 
 .. function:: to_unixtime(timestamp) -> double
 
@@ -328,6 +336,10 @@ Convenience Extraction Functions
     Returns the hour of the day from ``x``.
     The value ranges from ``0`` to ``23``.
 
+.. function:: millisecond(x) -> bigint
+
+    Returns the millisecond of the second from ``x``.
+
 .. function:: minute(x) -> bigint
 
     Returns the minute of the hour from ``x``.
@@ -343,7 +355,7 @@ Convenience Extraction Functions
 
 .. function:: second(x) -> bigint
 
-    Returns the second of the hour from ``x``.
+    Returns the second of the minute from ``x``.
 
 .. function:: timezone_hour(timestamp) -> bigint
 

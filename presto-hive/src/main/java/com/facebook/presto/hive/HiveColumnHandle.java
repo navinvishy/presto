@@ -15,21 +15,23 @@ package com.facebook.presto.hive;
 
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
+import com.facebook.presto.spi.Subfield;
 import com.facebook.presto.spi.type.TypeManager;
 import com.facebook.presto.spi.type.TypeSignature;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.HIDDEN;
 import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
+import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.SYNTHESIZED;
 import static com.facebook.presto.hive.HiveType.HIVE_INT;
 import static com.facebook.presto.hive.HiveType.HIVE_LONG;
 import static com.facebook.presto.hive.HiveType.HIVE_STRING;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
-import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
@@ -52,41 +54,46 @@ public class HiveColumnHandle
     {
         PARTITION_KEY,
         REGULAR,
-        HIDDEN
+        SYNTHESIZED,
     }
 
-    private final String clientId;
     private final String name;
     private final HiveType hiveType;
     private final TypeSignature typeName;
     private final int hiveColumnIndex;
     private final ColumnType columnType;
     private final Optional<String> comment;
+    private final List<Subfield> requiredSubfields;
 
     @JsonCreator
     public HiveColumnHandle(
-            @JsonProperty("clientId") String clientId,
             @JsonProperty("name") String name,
             @JsonProperty("hiveType") HiveType hiveType,
             @JsonProperty("typeSignature") TypeSignature typeSignature,
             @JsonProperty("hiveColumnIndex") int hiveColumnIndex,
             @JsonProperty("columnType") ColumnType columnType,
-            @JsonProperty("comment") Optional<String> comment)
+            @JsonProperty("comment") Optional<String> comment,
+            @JsonProperty("requiredSubfields") List<Subfield> requiredSubfields)
     {
-        this.clientId = requireNonNull(clientId, "clientId is null");
         this.name = requireNonNull(name, "name is null");
-        checkArgument(hiveColumnIndex >= 0 || columnType == PARTITION_KEY || columnType == HIDDEN, "hiveColumnIndex is negative");
+        checkArgument(hiveColumnIndex >= 0 || columnType == PARTITION_KEY || columnType == SYNTHESIZED, "hiveColumnIndex is negative");
         this.hiveColumnIndex = hiveColumnIndex;
         this.hiveType = requireNonNull(hiveType, "hiveType is null");
         this.typeName = requireNonNull(typeSignature, "type is null");
         this.columnType = requireNonNull(columnType, "columnType is null");
         this.comment = requireNonNull(comment, "comment is null");
+        this.requiredSubfields = requireNonNull(requiredSubfields, "requiredSubfields is null");
     }
 
-    @JsonProperty
-    public String getClientId()
+    public HiveColumnHandle(
+            String name,
+            HiveType hiveType,
+            TypeSignature typeSignature,
+            int hiveColumnIndex,
+            ColumnType columnType,
+            Optional<String> comment)
     {
-        return clientId;
+        this(name, hiveType, typeSignature, hiveColumnIndex, columnType, comment, ImmutableList.of());
     }
 
     @JsonProperty
@@ -114,7 +121,7 @@ public class HiveColumnHandle
 
     public boolean isHidden()
     {
-        return columnType == HIDDEN;
+        return columnType == SYNTHESIZED;
     }
 
     public ColumnMetadata getColumnMetadata(TypeManager typeManager)
@@ -140,10 +147,22 @@ public class HiveColumnHandle
         return columnType;
     }
 
+    @JsonProperty
+    public List<Subfield> getRequiredSubfields()
+    {
+        return requiredSubfields;
+    }
+
+    @Override
+    public ColumnHandle withRequiredSubfields(List<Subfield> subfields)
+    {
+        return new HiveColumnHandle(name, hiveType, typeName, hiveColumnIndex, columnType, comment, subfields);
+    }
+
     @Override
     public int hashCode()
     {
-        return Objects.hash(clientId, name, hiveColumnIndex, hiveType, columnType, comment);
+        return Objects.hash(name, hiveColumnIndex, hiveType, columnType, comment);
     }
 
     @Override
@@ -156,28 +175,25 @@ public class HiveColumnHandle
             return false;
         }
         HiveColumnHandle other = (HiveColumnHandle) obj;
-        return Objects.equals(this.clientId, other.clientId) &&
-                Objects.equals(this.name, other.name) &&
+        return Objects.equals(this.name, other.name) &&
                 Objects.equals(this.hiveColumnIndex, other.hiveColumnIndex) &&
                 Objects.equals(this.hiveType, other.hiveType) &&
                 Objects.equals(this.columnType, other.columnType) &&
-                Objects.equals(this.comment, other.comment);
+                Objects.equals(this.comment, other.comment) &&
+                Objects.equals(this.requiredSubfields, other.requiredSubfields);
     }
 
     @Override
     public String toString()
     {
-        return toStringHelper(this)
-                .add("clientId", clientId)
-                .add("name", name)
-                .add("hiveType", hiveType)
-                .add("hiveColumnIndex", hiveColumnIndex)
-                .add("columnType", columnType)
-                .add("comment", comment)
-                .toString();
+        if (requiredSubfields.isEmpty()) {
+            return name + ":" + hiveType + ":" + hiveColumnIndex + ":" + columnType;
+        }
+
+        return name + ":" + hiveType + ":" + hiveColumnIndex + ":" + columnType + ":" + requiredSubfields;
     }
 
-    public static HiveColumnHandle updateRowIdHandle(String connectorId)
+    public static HiveColumnHandle updateRowIdHandle()
     {
         // Hive connector only supports metadata delete. It does not support generic row-by-row deletion.
         // Metadata delete is implemented in Presto by generating a plan for row-by-row delete first,
@@ -185,17 +201,22 @@ public class HiveColumnHandle
         // plan-time support for row-by-row delete so that planning doesn't fail. This is why we need
         // rowid handle. Note that in Hive connector, rowid handle is not implemented beyond plan-time.
 
-        return new HiveColumnHandle(connectorId, UPDATE_ROW_ID_COLUMN_NAME, HIVE_LONG, BIGINT.getTypeSignature(), -1, HIDDEN, Optional.empty());
+        return new HiveColumnHandle(UPDATE_ROW_ID_COLUMN_NAME, HIVE_LONG, BIGINT.getTypeSignature(), -1, SYNTHESIZED, Optional.empty(), ImmutableList.of());
     }
 
-    public static HiveColumnHandle pathColumnHandle(String connectorId)
+    public static HiveColumnHandle pathColumnHandle()
     {
-        return new HiveColumnHandle(connectorId, PATH_COLUMN_NAME, PATH_HIVE_TYPE, PATH_TYPE_SIGNATURE, PATH_COLUMN_INDEX, HIDDEN, Optional.empty());
+        return new HiveColumnHandle(PATH_COLUMN_NAME, PATH_HIVE_TYPE, PATH_TYPE_SIGNATURE, PATH_COLUMN_INDEX, SYNTHESIZED, Optional.empty(), ImmutableList.of());
     }
 
-    public static HiveColumnHandle bucketColumnHandle(String connectorId)
+    /**
+     * The column indicating the bucket id.
+     * When table bucketing differs from partition bucketing, this column indicates
+     * what bucket the row will fall in under the table bucketing scheme.
+     */
+    public static HiveColumnHandle bucketColumnHandle()
     {
-        return new HiveColumnHandle(connectorId, BUCKET_COLUMN_NAME, BUCKET_HIVE_TYPE, BUCKET_TYPE_SIGNATURE, BUCKET_COLUMN_INDEX, HIDDEN, Optional.empty());
+        return new HiveColumnHandle(BUCKET_COLUMN_NAME, BUCKET_HIVE_TYPE, BUCKET_TYPE_SIGNATURE, BUCKET_COLUMN_INDEX, SYNTHESIZED, Optional.empty(), ImmutableList.of());
     }
 
     public static boolean isPathColumnHandle(HiveColumnHandle column)

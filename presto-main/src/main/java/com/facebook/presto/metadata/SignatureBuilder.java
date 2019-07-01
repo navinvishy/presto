@@ -13,14 +13,18 @@
  */
 package com.facebook.presto.metadata;
 
+import com.facebook.presto.spi.function.FunctionKind;
+import com.facebook.presto.spi.function.LongVariableConstraint;
 import com.facebook.presto.spi.function.OperatorType;
+import com.facebook.presto.spi.function.Signature;
+import com.facebook.presto.spi.function.TypeVariableConstraint;
 import com.facebook.presto.spi.type.TypeSignature;
+import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 
-import static com.facebook.presto.metadata.FunctionKind.SCALAR;
-import static com.facebook.presto.metadata.FunctionRegistry.mangleOperatorName;
-import static com.google.common.collect.ImmutableList.copyOf;
+import static com.facebook.presto.metadata.OperatorSignatureUtils.mangleOperatorName;
+import static com.facebook.presto.spi.function.FunctionKind.SCALAR;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
@@ -36,6 +40,11 @@ public final class SignatureBuilder
     private boolean variableArity;
 
     public SignatureBuilder() {}
+
+    public static SignatureBuilder builder()
+    {
+        return new SignatureBuilder();
+    }
 
     public SignatureBuilder name(String name)
     {
@@ -63,7 +72,7 @@ public final class SignatureBuilder
 
     public SignatureBuilder typeVariableConstraints(List<TypeVariableConstraint> typeVariableConstraints)
     {
-        this.typeVariableConstraints = copyOf(requireNonNull(typeVariableConstraints, "typeVariableConstraints is null"));
+        this.typeVariableConstraints = ImmutableList.copyOf(requireNonNull(typeVariableConstraints, "typeVariableConstraints is null"));
         return this;
     }
 
@@ -75,23 +84,23 @@ public final class SignatureBuilder
 
     public SignatureBuilder longVariableConstraints(LongVariableConstraint... longVariableConstraints)
     {
-        return longVariableConstraints(asList(requireNonNull(longVariableConstraints, "longVariableConstraints is null")));
+        return longVariableConstraints(ImmutableList.copyOf(requireNonNull(longVariableConstraints, "longVariableConstraints is null")));
     }
 
     public SignatureBuilder longVariableConstraints(List<LongVariableConstraint> longVariableConstraints)
     {
-        this.longVariableConstraints = copyOf(requireNonNull(longVariableConstraints, "longVariableConstraints is null"));
+        this.longVariableConstraints = ImmutableList.copyOf(requireNonNull(longVariableConstraints, "longVariableConstraints is null"));
         return this;
     }
 
     public SignatureBuilder argumentTypes(TypeSignature... argumentTypes)
     {
-        return argumentTypes(asList(requireNonNull(argumentTypes, "argumentTypes is Null")));
+        return argumentTypes(ImmutableList.copyOf(requireNonNull(argumentTypes, "argumentTypes is Null")));
     }
 
     public SignatureBuilder argumentTypes(List<TypeSignature> argumentTypes)
     {
-        this.argumentTypes = copyOf(requireNonNull(argumentTypes, "argumentTypes is null"));
+        this.argumentTypes = ImmutableList.copyOf(requireNonNull(argumentTypes, "argumentTypes is null"));
         return this;
     }
 

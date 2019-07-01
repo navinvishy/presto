@@ -13,86 +13,122 @@
  */
 package com.facebook.presto.sql.planner;
 
-import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
-import com.facebook.presto.sql.tree.ComparisonExpression;
-import com.facebook.presto.sql.tree.ComparisonExpressionType;
+import com.facebook.presto.metadata.Metadata;
+import com.facebook.presto.metadata.MetadataManager;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.sql.TestingRowExpressionTranslator;
+import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.FunctionCall;
-import com.facebook.presto.sql.tree.QualifiedName;
-import com.facebook.presto.sql.tree.SymbolReference;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.testng.annotations.Test;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.testng.AssertJUnit.assertEquals;
+import static com.facebook.presto.spi.type.BigintType.BIGINT;
+import static com.facebook.presto.sql.ExpressionUtils.extractConjuncts;
+import static com.facebook.presto.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static org.testng.Assert.assertEquals;
 
 public class TestSortExpressionExtractor
 {
-    private static final Set<Symbol> BUILD_SYMBOLS = ImmutableSet.of(new Symbol("b1"), new Symbol("b2"));
+    private static final Metadata METADATA = MetadataManager.createTestMetadataManager();
+    private static final TestingRowExpressionTranslator TRANSLATOR = new TestingRowExpressionTranslator(METADATA);
+    private static final Set<VariableReferenceExpression> BUILD_VARIABLES = ImmutableSet.of(
+            new VariableReferenceExpression("b1", BIGINT),
+            new VariableReferenceExpression("b2", BIGINT));
+    private static final TypeProvider TYPES = TypeProvider.viewOf(ImmutableMap.of(new Symbol("b1"), BIGINT, new Symbol("b2"), BIGINT, new Symbol("p1"), BIGINT, new Symbol("p2"), BIGINT));
 
     @Test
     public void testGetSortExpression()
     {
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new SymbolReference("p1"),
-                        new SymbolReference("b1")),
-                "b1");
+        assertGetSortExpression("p1 > b1", "b1");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.LESS_THAN_OR_EQUAL,
-                        new SymbolReference("b2"),
-                        new SymbolReference("p1")),
-                "b2");
+        assertGetSortExpression("b2 <= p1", "b2");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new SymbolReference("b2"),
-                        new SymbolReference("p1")),
-                "b2");
+        assertGetSortExpression("b2 > p1", "b2");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new SymbolReference("b2"),
-                        new FunctionCall(QualifiedName.of("sin"), ImmutableList.of(new SymbolReference("p1")))),
-                "b2");
+        assertGetSortExpression("b2 > sin(p1)", "b2");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new SymbolReference("b2"),
-                        new FunctionCall(QualifiedName.of("random"), ImmutableList.of(new SymbolReference("p1")))));
+        assertNoSortExpression("b2 > random(p1)");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new SymbolReference("b1"),
-                        new ArithmeticBinaryExpression(ArithmeticBinaryExpression.Type.ADD, new SymbolReference("b2"), new SymbolReference("p1"))));
+        assertGetSortExpression("b2 > random(p1) AND b2 > p1", "b2", "b2 > p1");
 
-        assertGetSortExpression(
-                new ComparisonExpression(
-                        ComparisonExpressionType.GREATER_THAN,
-                        new FunctionCall(QualifiedName.of("sin"), ImmutableList.of(new SymbolReference("b1"))),
-                        new SymbolReference("p1")));
+        assertGetSortExpression("b2 > random(p1) AND b1 > p1", "b1", "b1 > p1");
+
+        assertNoSortExpression("b1 > p1 + b2");
+
+        assertNoSortExpression("sin(b1) > p1");
+
+        assertNoSortExpression("b1 <= p1 OR b2 <= p1");
+
+        assertNoSortExpression("sin(b2) > p1 AND (b2 <= p1 OR b2 <= p1 + 10)");
+
+        assertGetSortExpression("sin(b2) > p1 AND (b2 <= p1 AND b2 <= p1 + 10)", "b2", "b2 <= p1", "b2 <= p1 + 10");
+
+        assertGetSortExpression("b1 > p1 AND b1 <= p1", "b1");
+
+        assertGetSortExpression("b1 > p1 AND b1 <= p1 AND b2 > p1", "b1", "b1 > p1", "b1 <= p1");
+
+        assertGetSortExpression("b1 > p1 AND b1 <= p1 AND b2 > p1 AND b2 < p1 + 10 AND b2 > p2", "b2", "b2 > p1", "b2 < p1 + 10", "b2 > p2");
     }
 
-    private static void assertGetSortExpression(Expression expression)
+    private Expression expression(String sql)
     {
-        Optional<Expression> actual = SortExpressionExtractor.extractSortExpression(BUILD_SYMBOLS, expression);
-        assertEquals(Optional.empty(), actual);
+        return rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(sql));
     }
 
-    private static void assertGetSortExpression(Expression expression, String expectedSymbol)
+    private void assertNoSortExpression(String expression)
     {
-        Optional<Expression> expected = Optional.of(new SymbolReference(expectedSymbol));
-        Optional<Expression> actual = SortExpressionExtractor.extractSortExpression(BUILD_SYMBOLS, expression);
-        assertEquals(expected, actual);
+        assertNoSortExpression(expression(expression));
+    }
+
+    private void assertNoSortExpression(Expression expression)
+    {
+        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(
+                BUILD_VARIABLES,
+                TRANSLATOR.translate(expression, TYPES),
+                METADATA.getFunctionManager());
+        assertEquals(actual, Optional.empty());
+    }
+
+    private void assertGetSortExpression(String expression, String expectedSymbol)
+    {
+        assertGetSortExpression(expression(expression), expectedSymbol);
+    }
+
+    private void assertGetSortExpression(Expression expression, String expectedSymbol)
+    {
+        // for now we expect that search expressions contain all the conjuncts from filterExpression as more complex cases are not supported yet.
+        assertGetSortExpression(expression, expectedSymbol, extractConjuncts(expression));
+    }
+
+    private void assertGetSortExpression(String expression, String expectedSymbol, String... searchExpressions)
+    {
+        assertGetSortExpression(expression(expression), expectedSymbol, searchExpressions);
+    }
+
+    private void assertGetSortExpression(Expression expression, String expectedSymbol, String... searchExpressions)
+    {
+        List<Expression> searchExpressionList = Arrays.stream(searchExpressions)
+                .map(this::expression)
+                .collect(toImmutableList());
+        assertGetSortExpression(expression, expectedSymbol, searchExpressionList);
+    }
+
+    private static void assertGetSortExpression(Expression expression, String expectedSymbol, List<Expression> searchExpressions)
+    {
+        Optional<SortExpressionContext> expected = Optional.of(new SortExpressionContext(
+                new VariableReferenceExpression(expectedSymbol, BIGINT),
+                searchExpressions.stream().map(e -> TRANSLATOR.translate(e, TYPES)).collect(toImmutableList())));
+        Optional<SortExpressionContext> actual = SortExpressionExtractor.extractSortExpression(
+                BUILD_VARIABLES,
+                TRANSLATOR.translate(expression, TYPES),
+                METADATA.getFunctionManager());
+        assertEquals(actual, expected);
     }
 }

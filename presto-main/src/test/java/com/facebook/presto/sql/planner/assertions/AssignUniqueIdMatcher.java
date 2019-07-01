@@ -15,17 +15,19 @@ package com.facebook.presto.sql.planner.assertions;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.plan.AssignUniqueId;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 
 import java.util.Optional;
+
+import static com.google.common.base.MoreObjects.toStringHelper;
 
 public class AssignUniqueIdMatcher
         implements RvalueMatcher
 {
     @Override
-    public Optional<Symbol> getAssignedSymbol(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
+    public Optional<VariableReferenceExpression> getAssignedVariable(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
     {
         if (!(node instanceof AssignUniqueId)) {
             return Optional.empty();
@@ -33,6 +35,13 @@ public class AssignUniqueIdMatcher
 
         AssignUniqueId assignUniqueIdNode = (AssignUniqueId) node;
 
-        return Optional.of(assignUniqueIdNode.getIdColumn());
+        return Optional.of(assignUniqueIdNode.getIdVariable());
+    }
+
+    @Override
+    public String toString()
+    {
+        return toStringHelper(this)
+                .toString();
     }
 }

@@ -13,50 +13,43 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.Session;
-import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.SymbolAllocator;
-import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.iterative.Pattern;
+import com.facebook.presto.matching.Captures;
+import com.facebook.presto.matching.Pattern;
+import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.planner.plan.FilterNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
-import com.facebook.presto.sql.planner.plan.ValuesNode;
 import com.facebook.presto.sql.tree.Expression;
+import com.google.common.collect.ImmutableList;
 
-import java.util.Optional;
-
+import static com.facebook.presto.sql.planner.plan.Patterns.filter;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
 import static com.facebook.presto.sql.tree.BooleanLiteral.FALSE_LITERAL;
 import static com.facebook.presto.sql.tree.BooleanLiteral.TRUE_LITERAL;
-import static java.util.Collections.emptyList;
-import static java.util.Optional.empty;
 
 public class RemoveTrivialFilters
-        implements Rule
+        implements Rule<FilterNode>
 {
-    private static final Pattern PATTERN = Pattern.node(FilterNode.class);
+    private static final Pattern<FilterNode> PATTERN = filter();
 
     @Override
-    public Pattern getPattern()
+    public Pattern<FilterNode> getPattern()
     {
         return PATTERN;
     }
 
     @Override
-    public Optional<PlanNode> apply(PlanNode node, Lookup lookup, PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session)
+    public Result apply(FilterNode filterNode, Captures captures, Context context)
     {
-        FilterNode filterNode = (FilterNode) node;
-
-        Expression predicate = filterNode.getPredicate();
+        Expression predicate = castToExpression(filterNode.getPredicate());
 
         if (predicate.equals(TRUE_LITERAL)) {
-            return Optional.of(filterNode.getSource());
+            return Result.ofPlanNode(filterNode.getSource());
         }
 
         if (predicate.equals(FALSE_LITERAL)) {
-            return Optional.of(new ValuesNode(idAllocator.getNextId(), filterNode.getOutputSymbols(), emptyList()));
+            return Result.ofPlanNode(new ValuesNode(context.getIdAllocator().getNextId(), filterNode.getOutputVariables(), ImmutableList.of()));
         }
 
-        return empty();
+        return Result.empty();
     }
 }

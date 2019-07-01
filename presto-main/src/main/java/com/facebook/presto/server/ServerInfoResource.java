@@ -15,6 +15,7 @@ package com.facebook.presto.server;
 
 import com.facebook.presto.client.NodeVersion;
 import com.facebook.presto.client.ServerInfo;
+import com.facebook.presto.metadata.StaticCatalogStore;
 import com.facebook.presto.spi.NodeState;
 import io.airlift.node.NodeInfo;
 
@@ -45,23 +46,26 @@ public class ServerInfoResource
     private final NodeVersion version;
     private final String environment;
     private final boolean coordinator;
+    private final StaticCatalogStore catalogStore;
     private final GracefulShutdownHandler shutdownHandler;
     private final long startTime = System.nanoTime();
 
     @Inject
-    public ServerInfoResource(NodeVersion nodeVersion, NodeInfo nodeInfo, ServerConfig serverConfig, GracefulShutdownHandler shutdownHandler)
+    public ServerInfoResource(NodeVersion nodeVersion, NodeInfo nodeInfo, ServerConfig serverConfig, StaticCatalogStore catalogStore, GracefulShutdownHandler shutdownHandler)
     {
         this.version = requireNonNull(nodeVersion, "nodeVersion is null");
         this.environment = requireNonNull(nodeInfo, "nodeInfo is null").getEnvironment();
-        this.coordinator = requireNonNull(requireNonNull(serverConfig, "serverConfig is null").isCoordinator());
+        this.coordinator = requireNonNull(serverConfig, "serverConfig is null").isCoordinator();
+        this.catalogStore = requireNonNull(catalogStore, "catalogStore is null");
         this.shutdownHandler = requireNonNull(shutdownHandler, "shutdownHandler is null");
     }
 
     @GET
     @Produces(APPLICATION_JSON)
-    public ServerInfo getServerInfo()
+    public ServerInfo getInfo()
     {
-        return new ServerInfo(version, environment, coordinator, Optional.of(nanosSince(startTime)));
+        boolean starting = !catalogStore.areCatalogsLoaded();
+        return new ServerInfo(version, environment, coordinator, starting, Optional.of(nanosSince(startTime)));
     }
 
     @PUT

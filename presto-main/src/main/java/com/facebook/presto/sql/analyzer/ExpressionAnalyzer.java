@@ -14,18 +14,23 @@
 package com.facebook.presto.sql.analyzer;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.metadata.FunctionRegistry;
+import com.facebook.presto.SystemSessionProperties;
+import com.facebook.presto.execution.warnings.WarningCollector;
+import com.facebook.presto.metadata.FunctionManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.OperatorNotFoundException;
-import com.facebook.presto.metadata.Signature;
+import com.facebook.presto.metadata.QualifiedObjectName;
 import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.security.DenyAllAccessControl;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.StandardErrorCode;
+import com.facebook.presto.spi.function.FunctionHandle;
+import com.facebook.presto.spi.function.FunctionMetadata;
 import com.facebook.presto.spi.function.OperatorType;
 import com.facebook.presto.spi.type.CharType;
 import com.facebook.presto.spi.type.DecimalParseResult;
 import com.facebook.presto.spi.type.Decimals;
+import com.facebook.presto.spi.type.FunctionType;
 import com.facebook.presto.spi.type.RowType;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
@@ -33,6 +38,7 @@ import com.facebook.presto.spi.type.TypeSignatureParameter;
 import com.facebook.presto.spi.type.VarcharType;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.Symbol;
+import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.ArithmeticUnaryExpression;
 import com.facebook.presto.sql.tree.ArrayConstructor;
@@ -45,7 +51,9 @@ import com.facebook.presto.sql.tree.Cast;
 import com.facebook.presto.sql.tree.CharLiteral;
 import com.facebook.presto.sql.tree.CoalesceExpression;
 import com.facebook.presto.sql.tree.ComparisonExpression;
+import com.facebook.presto.sql.tree.CurrentPath;
 import com.facebook.presto.sql.tree.CurrentTime;
+import com.facebook.presto.sql.tree.CurrentUser;
 import com.facebook.presto.sql.tree.DecimalLiteral;
 import com.facebook.presto.sql.tree.DereferenceExpression;
 import com.facebook.presto.sql.tree.DoubleLiteral;
@@ -90,26 +98,26 @@ import com.facebook.presto.sql.tree.TimestampLiteral;
 import com.facebook.presto.sql.tree.TryExpression;
 import com.facebook.presto.sql.tree.WhenClause;
 import com.facebook.presto.sql.tree.WindowFrame;
-import com.facebook.presto.type.FunctionType;
+import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Multimap;
 import io.airlift.slice.SliceUtf8;
 
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 
-import static com.facebook.presto.operator.scalar.GroupingOperationFunction.MAX_NUMBER_GROUPING_ARGUMENTS_BIGINT;
-import static com.facebook.presto.operator.scalar.GroupingOperationFunction.MAX_NUMBER_GROUPING_ARGUMENTS_INTEGER;
+import static com.facebook.presto.SystemSessionProperties.isLegacyRowFieldOrdinalAccessEnabled;
+import static com.facebook.presto.metadata.CastType.CAST;
 import static com.facebook.presto.spi.function.OperatorType.SUBSCRIPT;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
@@ -117,7 +125,6 @@ import static com.facebook.presto.spi.type.DateType.DATE;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
 import static com.facebook.presto.spi.type.IntegerType.INTEGER;
 import static com.facebook.presto.spi.type.RealType.REAL;
-import static com.facebook.presto.spi.type.RowType.RowField;
 import static com.facebook.presto.spi.type.SmallintType.SMALLINT;
 import static com.facebook.presto.spi.type.TimeType.TIME;
 import static com.facebook.presto.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
@@ -138,6 +145,7 @@ import static com.facebook.presto.sql.analyzer.SemanticErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.STANDALONE_LAMBDA;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.TYPE_MISMATCH;
 import static com.facebook.presto.sql.analyzer.SemanticExceptions.missingAttributeException;
+import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.sql.tree.Extract.Field.TIMEZONE_HOUR;
 import static com.facebook.presto.sql.tree.Extract.Field.TIMEZONE_MINUTE;
 import static com.facebook.presto.type.ArrayParametricType.ARRAY;
@@ -148,6 +156,7 @@ import static com.facebook.presto.type.UnknownType.UNKNOWN;
 import static com.facebook.presto.util.DateTimeUtils.parseTimestampLiteral;
 import static com.facebook.presto.util.DateTimeUtils.timeHasTimeZone;
 import static com.facebook.presto.util.DateTimeUtils.timestampHasTimeZone;
+import static com.facebook.presto.util.LegacyRowFieldOrdinalAccessUtil.parseAnonymousRowFieldOrdinalAccess;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -159,13 +168,17 @@ import static java.util.Objects.requireNonNull;
 
 public class ExpressionAnalyzer
 {
-    private final FunctionRegistry functionRegistry;
+    private static final int MAX_NUMBER_GROUPING_ARGUMENTS_BIGINT = 63;
+    private static final int MAX_NUMBER_GROUPING_ARGUMENTS_INTEGER = 31;
+
+    private final FunctionManager functionManager;
     private final TypeManager typeManager;
     private final Function<Node, StatementAnalyzer> statementAnalyzerFactory;
-    private final Map<Symbol, Type> symbolTypes;
+    private final TypeProvider symbolTypes;
     private final boolean isDescribe;
+    private final boolean legacyRowFieldOrdinalAccess;
 
-    private final Map<NodeRef<FunctionCall>, Signature> resolvedFunctions = new LinkedHashMap<>();
+    private final Map<NodeRef<FunctionCall>, FunctionHandle> resolvedFunctions = new LinkedHashMap<>();
     private final Set<NodeRef<SubqueryExpression>> scalarSubqueries = new LinkedHashSet<>();
     private final Set<NodeRef<ExistsPredicate>> existsSubqueries = new LinkedHashSet<>();
     private final Map<NodeRef<Expression>, Type> expressionCoercions = new LinkedHashMap<>();
@@ -176,29 +189,35 @@ public class ExpressionAnalyzer
     private final Set<NodeRef<QuantifiedComparisonExpression>> quantifiedComparisons = new LinkedHashSet<>();
     // For lambda argument references, maps each QualifiedNameReference to the referenced LambdaArgumentDeclaration
     private final Map<NodeRef<Identifier>, LambdaArgumentDeclaration> lambdaArgumentReferences = new LinkedHashMap<>();
+    private final Set<NodeRef<FunctionCall>> windowFunctions = new LinkedHashSet<>();
+    private final Multimap<QualifiedObjectName, String> tableColumnReferences = HashMultimap.create();
 
     private final Session session;
     private final List<Expression> parameters;
+    private final WarningCollector warningCollector;
 
     public ExpressionAnalyzer(
-            FunctionRegistry functionRegistry,
+            FunctionManager functionManager,
             TypeManager typeManager,
             Function<Node, StatementAnalyzer> statementAnalyzerFactory,
             Session session,
-            Map<Symbol, Type> symbolTypes,
+            TypeProvider symbolTypes,
             List<Expression> parameters,
+            WarningCollector warningCollector,
             boolean isDescribe)
     {
-        this.functionRegistry = requireNonNull(functionRegistry, "functionRegistry is null");
+        this.functionManager = requireNonNull(functionManager, "functionManager is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.statementAnalyzerFactory = requireNonNull(statementAnalyzerFactory, "statementAnalyzerFactory is null");
         this.session = requireNonNull(session, "session is null");
-        this.symbolTypes = ImmutableMap.copyOf(requireNonNull(symbolTypes, "symbolTypes is null"));
+        this.symbolTypes = requireNonNull(symbolTypes, "symbolTypes is null");
         this.parameters = requireNonNull(parameters, "parameters is null");
         this.isDescribe = isDescribe;
+        this.legacyRowFieldOrdinalAccess = isLegacyRowFieldOrdinalAccessEnabled(session);
+        this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
     }
 
-    public Map<NodeRef<FunctionCall>, Signature> getResolvedFunctions()
+    public Map<NodeRef<FunctionCall>, FunctionHandle> getResolvedFunctions()
     {
         return unmodifiableMap(resolvedFunctions);
     }
@@ -254,13 +273,13 @@ public class ExpressionAnalyzer
 
     public Type analyze(Expression expression, Scope scope)
     {
-        Visitor visitor = new Visitor(scope);
-        return visitor.process(expression, new StackableAstVisitor.StackableAstVisitorContext<>(Context.notInLambda()));
+        Visitor visitor = new Visitor(scope, warningCollector);
+        return visitor.process(expression, new StackableAstVisitor.StackableAstVisitorContext<>(Context.notInLambda(scope)));
     }
 
-    private Type analyze(Expression expression, Scope scope, Context context)
+    private Type analyze(Expression expression, Scope baseScope, Context context)
     {
-        Visitor visitor = new Visitor(scope);
+        Visitor visitor = new Visitor(baseScope, warningCollector);
         return visitor.process(expression, new StackableAstVisitor.StackableAstVisitorContext<>(context));
     }
 
@@ -279,24 +298,38 @@ public class ExpressionAnalyzer
         return unmodifiableSet(quantifiedComparisons);
     }
 
+    public Set<NodeRef<FunctionCall>> getWindowFunctions()
+    {
+        return unmodifiableSet(windowFunctions);
+    }
+
+    public Multimap<QualifiedObjectName, String> getTableColumnReferences()
+    {
+        return tableColumnReferences;
+    }
+
     private class Visitor
             extends StackableAstVisitor<Type, Context>
     {
-        private final Scope scope;
+        // Used to resolve FieldReferences (e.g. during local execution planning)
+        private final Scope baseScope;
+        private final WarningCollector warningCollector;
 
-        private Visitor(Scope scope)
+        public Visitor(Scope baseScope, WarningCollector warningCollector)
         {
-            this.scope = requireNonNull(scope, "scope is null");
+            this.baseScope = requireNonNull(baseScope, "baseScope is null");
+            this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
         }
 
-        @SuppressWarnings("SuspiciousMethodCalls")
         @Override
         public Type process(Node node, @Nullable StackableAstVisitorContext<Context> context)
         {
-            // don't double process a node
-            Type type = expressionTypes.get(NodeRef.of(node));
-            if (type != null) {
-                return type;
+            if (node instanceof Expression) {
+                // don't double process a node
+                Type type = expressionTypes.get(NodeRef.of(((Expression) node)));
+                if (type != null) {
+                    return type;
+                }
             }
             return super.process(node, context);
         }
@@ -308,7 +341,7 @@ public class ExpressionAnalyzer
                     .map((child) -> process(child, context))
                     .collect(toImmutableList());
 
-            Type type = new RowType(types, Optional.empty());
+            Type type = RowType.anonymous(types);
             return setExpressionType(node, type);
         }
 
@@ -320,7 +353,7 @@ public class ExpressionAnalyzer
             }
 
             Type type;
-            switch (node.getType()) {
+            switch (node.getFunction()) {
                 case DATE:
                     type = DATE;
                     break;
@@ -337,7 +370,7 @@ public class ExpressionAnalyzer
                     type = TIMESTAMP;
                     break;
                 default:
-                    throw new SemanticException(NOT_SUPPORTED, node, "%s not yet supported", node.getType().getName());
+                    throw new SemanticException(NOT_SUPPORTED, node, "%s not yet supported", node.getFunction().getName());
             }
 
             return setExpressionType(node, type);
@@ -347,10 +380,9 @@ public class ExpressionAnalyzer
         protected Type visitSymbolReference(SymbolReference node, StackableAstVisitorContext<Context> context)
         {
             if (context.getContext().isInLambda()) {
-                LambdaArgumentDeclaration lambdaArgumentDeclaration = context.getContext().getNameToLambdaArgumentDeclarationMap().get(node.getName());
-                if (lambdaArgumentDeclaration != null) {
-                    Type result = getExpressionType(lambdaArgumentDeclaration);
-                    return setExpressionType(node, result);
+                Optional<ResolvedField> resolvedField = context.getContext().getScope().tryResolveField(node, QualifiedName.of(node.getName()));
+                if (resolvedField.isPresent() && context.getContext().getFieldToLambdaArgumentDeclaration().containsKey(FieldId.from(resolvedField.get()))) {
+                    return setExpressionType(node, resolvedField.get().getType());
                 }
             }
             Type type = symbolTypes.get(Symbol.from(node));
@@ -360,27 +392,33 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitIdentifier(Identifier node, StackableAstVisitorContext<Context> context)
         {
+            ResolvedField resolvedField = context.getContext().getScope().resolveField(node, QualifiedName.of(node.getValue()));
+            return handleResolvedField(node, resolvedField, context);
+        }
+
+        private Type handleResolvedField(Expression node, ResolvedField resolvedField, StackableAstVisitorContext<Context> context)
+        {
+            return handleResolvedField(node, FieldId.from(resolvedField), resolvedField.getField(), context);
+        }
+
+        private Type handleResolvedField(Expression node, FieldId fieldId, Field field, StackableAstVisitorContext<Context> context)
+        {
             if (context.getContext().isInLambda()) {
-                LambdaArgumentDeclaration lambdaArgumentDeclaration = context.getContext().getNameToLambdaArgumentDeclarationMap().get(node.getName());
+                LambdaArgumentDeclaration lambdaArgumentDeclaration = context.getContext().getFieldToLambdaArgumentDeclaration().get(fieldId);
                 if (lambdaArgumentDeclaration != null) {
-                    lambdaArgumentReferences.put(NodeRef.of(node), lambdaArgumentDeclaration);
-                    Type result = getExpressionType(lambdaArgumentDeclaration);
-                    return setExpressionType(node, result);
+                    // Lambda argument reference is not a column reference
+                    lambdaArgumentReferences.put(NodeRef.of((Identifier) node), lambdaArgumentDeclaration);
+                    return setExpressionType(node, field.getType());
                 }
             }
-            return handleResolvedField(node, scope.resolveField(node, QualifiedName.of(node.getName())));
-        }
 
-        private Type handleResolvedField(Expression node, ResolvedField resolvedField)
-        {
-            return handleResolvedField(node, FieldId.from(resolvedField), resolvedField.getType());
-        }
+            if (field.getOriginTable().isPresent() && field.getOriginColumnName().isPresent()) {
+                tableColumnReferences.put(field.getOriginTable().get(), field.getOriginColumnName().get());
+            }
 
-        private Type handleResolvedField(Expression node, FieldId fieldId, Type resolvedType)
-        {
             FieldId previous = columnReferences.put(NodeRef.of(node), fieldId);
             checkState(previous == null, "%s already known to refer to %s", node, previous);
-            return setExpressionType(node, resolvedType);
+            return setExpressionType(node, field.getType());
         }
 
         @Override
@@ -388,16 +426,15 @@ public class ExpressionAnalyzer
         {
             QualifiedName qualifiedName = DereferenceExpression.getQualifiedName(node);
 
-            if (!context.getContext().isInLambda()) {
-                // If this Dereference looks like column reference, try match it to column first.
-                if (qualifiedName != null) {
-                    Optional<ResolvedField> resolvedField = scope.tryResolveField(node, qualifiedName);
-                    if (resolvedField.isPresent()) {
-                        return handleResolvedField(node, resolvedField.get());
-                    }
-                    if (!scope.isColumnReference(qualifiedName)) {
-                        throw missingAttributeException(node, qualifiedName);
-                    }
+            // If this Dereference looks like column reference, try match it to column first.
+            if (qualifiedName != null) {
+                Scope scope = context.getContext().getScope();
+                Optional<ResolvedField> resolvedField = scope.tryResolveField(node, qualifiedName);
+                if (resolvedField.isPresent()) {
+                    return handleResolvedField(node, resolvedField.get(), context);
+                }
+                if (!scope.isColumnReference(qualifiedName)) {
+                    throw missingAttributeException(node, qualifiedName);
                 }
             }
 
@@ -407,14 +444,23 @@ public class ExpressionAnalyzer
             }
 
             RowType rowType = (RowType) baseType;
+            String fieldName = node.getField().getValue();
 
             Type rowFieldType = null;
-            for (RowField rowField : rowType.getFields()) {
-                if (node.getFieldName().equalsIgnoreCase(rowField.getName().orElse(null))) {
+            for (RowType.Field rowField : rowType.getFields()) {
+                if (fieldName.equalsIgnoreCase(rowField.getName().orElse(null))) {
                     rowFieldType = rowField.getType();
                     break;
                 }
             }
+
+            if (legacyRowFieldOrdinalAccess && rowFieldType == null) {
+                OptionalInt rowIndex = parseAnonymousRowFieldOrdinalAccess(fieldName, rowType.getFields());
+                if (rowIndex.isPresent()) {
+                    rowFieldType = rowType.getFields().get(rowIndex.getAsInt()).getType();
+                }
+            }
+
             if (rowFieldType == null) {
                 throw missingAttributeException(node);
             }
@@ -442,7 +488,7 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitComparisonExpression(ComparisonExpression node, StackableAstVisitorContext<Context> context)
         {
-            OperatorType operatorType = OperatorType.valueOf(node.getType().name());
+            OperatorType operatorType = OperatorType.valueOf(node.getOperator().name());
             return getOperator(context, node, operatorType, node.getLeft(), node.getRight());
         }
 
@@ -572,19 +618,23 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitArithmeticBinary(ArithmeticBinaryExpression node, StackableAstVisitorContext<Context> context)
         {
-            return getOperator(context, node, OperatorType.valueOf(node.getType().name()), node.getLeft(), node.getRight());
+            return getOperator(context, node, OperatorType.valueOf(node.getOperator().name()), node.getLeft(), node.getRight());
         }
 
         @Override
         protected Type visitLikePredicate(LikePredicate node, StackableAstVisitorContext<Context> context)
         {
-            Type valueType = getVarcharType(node.getValue(), context);
+            Type valueType = process(node.getValue(), context);
+            if (!(valueType instanceof CharType) && !(valueType instanceof VarcharType)) {
+                coerceType(context, node.getValue(), VARCHAR, "Left side of LIKE expression");
+            }
+
             Type patternType = getVarcharType(node.getPattern(), context);
-            coerceType(context, node.getValue(), valueType, "Left side of LIKE expression");
             coerceType(context, node.getPattern(), patternType, "Pattern for LIKE expression");
-            if (node.getEscape() != null) {
-                Type escapeType = getVarcharType(node.getEscape(), context);
-                coerceType(context, node.getEscape(), escapeType, "Escape for LIKE expression");
+            if (node.getEscape().isPresent()) {
+                Expression escape = node.getEscape().get();
+                Type escapeType = getVarcharType(escape, context);
+                coerceType(context, escape, escapeType, "Escape for LIKE expression");
             }
 
             return setExpressionType(node, BOOLEAN);
@@ -665,14 +715,17 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitGenericLiteral(GenericLiteral node, StackableAstVisitorContext<Context> context)
         {
-            Type type = typeManager.getType(parseTypeSignature(node.getType()));
-            if (type == null) {
+            Type type;
+            try {
+                type = typeManager.getType(parseTypeSignature(node.getType()));
+            }
+            catch (IllegalArgumentException e) {
                 throw new SemanticException(TYPE_MISMATCH, node, "Unknown type: " + node.getType());
             }
 
             if (!JSON.equals(type)) {
                 try {
-                    functionRegistry.getCoercion(VARCHAR, type);
+                    functionManager.lookupCast(CAST, VARCHAR.getTypeSignature(), type.getTypeSignature());
                 }
                 catch (IllegalArgumentException e) {
                     throw new SemanticException(TYPE_MISMATCH, node, "No literal form for type %s", type);
@@ -685,13 +738,14 @@ public class ExpressionAnalyzer
         @Override
         protected Type visitTimeLiteral(TimeLiteral node, StackableAstVisitorContext<Context> context)
         {
-            Type type;
-            if (timeHasTimeZone(node.getValue())) {
-                type = TIME_WITH_TIME_ZONE;
+            boolean hasTimeZone;
+            try {
+                hasTimeZone = timeHasTimeZone(node.getValue());
             }
-            else {
-                type = TIME;
+            catch (IllegalArgumentException e) {
+                throw new SemanticException(INVALID_LITERAL, node, "'%s' is not a valid time literal", node.getValue());
             }
+            Type type = hasTimeZone ? TIME_WITH_TIME_ZONE : TIME;
             return setExpressionType(node, type);
         }
 
@@ -699,7 +753,12 @@ public class ExpressionAnalyzer
         protected Type visitTimestampLiteral(TimestampLiteral node, StackableAstVisitorContext<Context> context)
         {
             try {
-                parseTimestampLiteral(session.getTimeZoneKey(), node.getValue());
+                if (SystemSessionProperties.isLegacyTimestamp(session)) {
+                    parseTimestampLiteral(session.getTimeZoneKey(), node.getValue());
+                }
+                else {
+                    parseTimestampLiteral(node.getValue());
+                }
             }
             catch (Exception e) {
                 throw new SemanticException(INVALID_LITERAL, node, "'%s' is not a valid timestamp literal", node.getValue());
@@ -771,6 +830,8 @@ public class ExpressionAnalyzer
                         }
                     }
                 }
+
+                windowFunctions.add(NodeRef.of(node));
             }
 
             if (node.getFilter().isPresent()) {
@@ -784,19 +845,24 @@ public class ExpressionAnalyzer
                     argumentTypesBuilder.add(new TypeSignatureProvider(
                             types -> {
                                 ExpressionAnalyzer innerExpressionAnalyzer = new ExpressionAnalyzer(
-                                        functionRegistry,
+                                        functionManager,
                                         typeManager,
                                         statementAnalyzerFactory,
                                         session,
                                         symbolTypes,
                                         parameters,
+                                        warningCollector,
                                         isDescribe);
                                 if (context.getContext().isInLambda()) {
-                                    for (LambdaArgumentDeclaration argument : context.getContext().getNameToLambdaArgumentDeclarationMap().values()) {
+                                    for (LambdaArgumentDeclaration argument : context.getContext().getFieldToLambdaArgumentDeclaration().values()) {
                                         innerExpressionAnalyzer.setExpressionType(argument, getExpressionType(argument));
                                     }
                                 }
-                                return innerExpressionAnalyzer.analyze(expression, scope, context.getContext().expectingLambda(types)).getTypeSignature();
+                                Type type = innerExpressionAnalyzer.analyze(expression, baseScope, context.getContext().expectingLambda(types));
+                                if (expression instanceof LambdaExpression) {
+                                    verifyNoAggregateWindowOrGroupingFunctions(innerExpressionAnalyzer.getResolvedFunctions(), functionManager, ((LambdaExpression) expression).getBody(), "Lambda expression");
+                                }
+                                return type.getTypeSignature();
                             }));
                 }
                 else {
@@ -805,12 +871,22 @@ public class ExpressionAnalyzer
             }
 
             ImmutableList<TypeSignatureProvider> argumentTypes = argumentTypesBuilder.build();
-            Signature function = resolveFunction(node, argumentTypes, functionRegistry);
+            FunctionHandle function = resolveFunction(session, node, argumentTypes, functionManager);
+            FunctionMetadata functionMetadata = functionManager.getFunctionMetadata(function);
+
+            if (node.getOrderBy().isPresent()) {
+                for (SortItem sortItem : node.getOrderBy().get().getSortItems()) {
+                    Type sortKeyType = process(sortItem.getSortKey(), context);
+                    if (!sortKeyType.isOrderable()) {
+                        throw new SemanticException(TYPE_MISMATCH, node, "ORDER BY can only be applied to orderable types (actual: %s)", sortKeyType.getDisplayName());
+                    }
+                }
+            }
 
             for (int i = 0; i < node.getArguments().size(); i++) {
                 Expression expression = node.getArguments().get(i);
-                Type expectedType = typeManager.getType(function.getArgumentTypes().get(i));
-                requireNonNull(expectedType, format("Type %s not found", function.getArgumentTypes().get(i)));
+                Type expectedType = typeManager.getType(functionMetadata.getArgumentTypes().get(i));
+                requireNonNull(expectedType, format("Type %s not found", functionMetadata.getArgumentTypes().get(i)));
                 if (node.isDistinct() && !expectedType.isComparable()) {
                     throw new SemanticException(TYPE_MISMATCH, node, "DISTINCT can only be applied to comparable types (actual: %s)", expectedType);
                 }
@@ -825,7 +901,7 @@ public class ExpressionAnalyzer
             }
             resolvedFunctions.put(NodeRef.of(node), function);
 
-            Type type = typeManager.getType(function.getReturnType());
+            Type type = typeManager.getType(functionMetadata.getReturnType());
             return setExpressionType(node, type);
         }
 
@@ -846,6 +922,18 @@ public class ExpressionAnalyzer
             }
 
             return setExpressionType(node, resultType);
+        }
+
+        @Override
+        protected Type visitCurrentUser(CurrentUser node, StackableAstVisitorContext<Context> context)
+        {
+            return setExpressionType(node, VARCHAR);
+        }
+
+        @Override
+        protected Type visitCurrentPath(CurrentPath node, StackableAstVisitorContext<Context> context)
+        {
+            return setExpressionType(node, VARCHAR);
         }
 
         @Override
@@ -900,9 +988,6 @@ public class ExpressionAnalyzer
         @Override
         public Type visitTryExpression(TryExpression node, StackableAstVisitorContext<Context> context)
         {
-            if (context.getContext().isInLambda()) {
-                throw new PrestoException(StandardErrorCode.NOT_SUPPORTED, "Try expression inside lambda expression is not support yet");
-            }
             Type type = process(node.getInnerExpression(), context);
             return setExpressionType(node, type);
         }
@@ -910,8 +995,11 @@ public class ExpressionAnalyzer
         @Override
         public Type visitCast(Cast node, StackableAstVisitorContext<Context> context)
         {
-            Type type = typeManager.getType(parseTypeSignature(node.getType()));
-            if (type == null) {
+            Type type;
+            try {
+                type = typeManager.getType(parseTypeSignature(node.getType()));
+            }
+            catch (IllegalArgumentException e) {
                 throw new SemanticException(TYPE_MISMATCH, node, "Unknown type: " + node.getType());
             }
 
@@ -922,7 +1010,7 @@ public class ExpressionAnalyzer
             Type value = process(node.getExpression(), context);
             if (!value.equals(UNKNOWN) && !node.isTypeOnly()) {
                 try {
-                    functionRegistry.getCoercion(value, type);
+                    functionManager.lookupCast(CAST, value.getTypeSignature(), type.getTypeSignature());
                 }
                 catch (OperatorNotFoundException e) {
                     throw new SemanticException(TYPE_MISMATCH, node, "Cannot cast %s to %s", value, type);
@@ -972,7 +1060,7 @@ public class ExpressionAnalyzer
             }
             StatementAnalyzer analyzer = statementAnalyzerFactory.apply(node);
             Scope subqueryScope = Scope.builder()
-                    .withParent(scope)
+                    .withParent(context.getContext().getScope())
                     .build();
             Scope queryScope = analyzer.analyze(node.getQuery(), subqueryScope);
 
@@ -1003,7 +1091,7 @@ public class ExpressionAnalyzer
         protected Type visitExists(ExistsPredicate node, StackableAstVisitorContext<Context> context)
         {
             StatementAnalyzer analyzer = statementAnalyzerFactory.apply(node);
-            Scope subqueryScope = Scope.builder().withParent(scope).build();
+            Scope subqueryScope = Scope.builder().withParent(context.getContext().getScope()).build();
             analyzer.analyze(node.getSubquery(), subqueryScope);
 
             existsSubqueries.add(NodeRef.of(node));
@@ -1022,7 +1110,7 @@ public class ExpressionAnalyzer
 
             Type comparisonType = coerceToSingleType(context, node, "Value expression and result of subquery must be of the same type for quantified comparison: %s vs %s", value, subquery);
 
-            switch (node.getComparisonType()) {
+            switch (node.getOperator()) {
                 case LESS_THAN:
                 case LESS_THAN_OR_EQUAL:
                 case GREATER_THAN:
@@ -1038,7 +1126,7 @@ public class ExpressionAnalyzer
                     }
                     break;
                 default:
-                    checkState(false, "Unexpected comparison type: %s", node.getComparisonType());
+                    throw new IllegalStateException(format("Unexpected comparison type: %s", node.getOperator()));
             }
 
             return setExpressionType(node, BOOLEAN);
@@ -1047,14 +1135,13 @@ public class ExpressionAnalyzer
         @Override
         public Type visitFieldReference(FieldReference node, StackableAstVisitorContext<Context> context)
         {
-            Type type = scope.getRelationType().getFieldByIndex(node.getFieldIndex()).getType();
-            return handleResolvedField(node, new FieldId(scope.getRelationId(), node.getFieldIndex()), type);
+            Field field = baseScope.getRelationType().getFieldByIndex(node.getFieldIndex());
+            return handleResolvedField(node, new FieldId(baseScope.getRelationId(), node.getFieldIndex()), field, context);
         }
 
         @Override
         protected Type visitLambdaExpression(LambdaExpression node, StackableAstVisitorContext<Context> context)
         {
-            verifyNoAggregateWindowOrGroupingFunctions(functionRegistry, node.getBody(), "Lambda expression");
             if (!context.getContext().isExpectingLambda()) {
                 throw new SemanticException(STANDALONE_LAMBDA, node, "Lambda expression should always be used inside a function");
             }
@@ -1066,18 +1153,30 @@ public class ExpressionAnalyzer
                 throw new SemanticException(INVALID_PARAMETER_USAGE, node,
                         format("Expected a lambda that takes %s argument(s) but got %s", types.size(), lambdaArguments.size()));
             }
-            verify(types.size() == lambdaArguments.size());
 
-            Map<String, LambdaArgumentDeclaration> nameToLambdaArgumentDeclarationMap = new HashMap<>();
-            if (context.getContext().isInLambda()) {
-                nameToLambdaArgumentDeclarationMap.putAll(context.getContext().getNameToLambdaArgumentDeclarationMap());
-            }
+            ImmutableList.Builder<Field> fields = ImmutableList.builder();
             for (int i = 0; i < lambdaArguments.size(); i++) {
                 LambdaArgumentDeclaration lambdaArgument = lambdaArguments.get(i);
-                nameToLambdaArgumentDeclarationMap.put(lambdaArgument.getName(), lambdaArgument);
-                setExpressionType(lambdaArgument, types.get(i));
+                Type type = types.get(i);
+                fields.add(com.facebook.presto.sql.analyzer.Field.newUnqualified(lambdaArgument.getName().getValue(), type));
+                setExpressionType(lambdaArgument, type);
             }
-            Type returnType = process(node.getBody(), new StackableAstVisitorContext<Context>(Context.inLambda(nameToLambdaArgumentDeclarationMap)));
+
+            Scope lambdaScope = Scope.builder()
+                    .withParent(context.getContext().getScope())
+                    .withRelationType(RelationId.of(node), new RelationType(fields.build()))
+                    .build();
+
+            ImmutableMap.Builder<FieldId, LambdaArgumentDeclaration> fieldToLambdaArgumentDeclaration = ImmutableMap.builder();
+            if (context.getContext().isInLambda()) {
+                fieldToLambdaArgumentDeclaration.putAll(context.getContext().getFieldToLambdaArgumentDeclaration());
+            }
+            for (LambdaArgumentDeclaration lambdaArgument : lambdaArguments) {
+                ResolvedField resolvedField = lambdaScope.resolveField(lambdaArgument, QualifiedName.of(lambdaArgument.getName().getValue()));
+                fieldToLambdaArgumentDeclaration.put(FieldId.from(resolvedField), lambdaArgument);
+            }
+
+            Type returnType = process(node.getBody(), new StackableAstVisitorContext<>(Context.inLambda(lambdaScope, fieldToLambdaArgumentDeclaration.build())));
             FunctionType functionType = new FunctionType(types, returnType);
             return setExpressionType(node, functionType);
         }
@@ -1101,7 +1200,7 @@ public class ExpressionAnalyzer
             int numCapturedValues = node.getValues().size();
             verify(argumentTypes.size() == functionInputTypes.size());
             for (int i = 0; i < numCapturedValues; i++) {
-                verify(functionInputTypes.get(i) == argumentTypes.get(i));
+                verify(functionInputTypes.get(i).equals(argumentTypes.get(i)));
             }
 
             FunctionType result = new FunctionType(argumentTypes.subList(numCapturedValues, argumentTypes.size()), functionType.getReturnType());
@@ -1120,6 +1219,7 @@ public class ExpressionAnalyzer
             throw new SemanticException(NOT_SUPPORTED, node, "not yet implemented: " + node.getClass().getName());
         }
 
+        @Override
         public Type visitGroupingOperation(GroupingOperation node, StackableAstVisitorContext<Context> context)
         {
             if (node.getGroupingColumns().size() > MAX_NUMBER_GROUPING_ARGUMENTS_BIGINT) {
@@ -1145,9 +1245,9 @@ public class ExpressionAnalyzer
                 argumentTypes.add(process(expression, context));
             }
 
-            Signature operatorSignature;
+            FunctionMetadata operatorMetadata;
             try {
-                operatorSignature = functionRegistry.resolveOperator(operatorType, argumentTypes.build());
+                operatorMetadata = functionManager.getFunctionMetadata(functionManager.resolveOperator(operatorType, fromTypes(argumentTypes.build())));
             }
             catch (OperatorNotFoundException e) {
                 throw new SemanticException(TYPE_MISMATCH, node, "%s", e.getMessage());
@@ -1161,11 +1261,11 @@ public class ExpressionAnalyzer
 
             for (int i = 0; i < arguments.length; i++) {
                 Expression expression = arguments[i];
-                Type type = typeManager.getType(operatorSignature.getArgumentTypes().get(i));
-                coerceType(context, expression, type, format("Operator %s argument %d", operatorSignature, i));
+                Type type = typeManager.getType(operatorMetadata.getArgumentTypes().get(i));
+                coerceType(context, expression, type, format("Operator %s argument %d", operatorMetadata, i));
             }
 
-            Type type = typeManager.getType(operatorSignature.getReturnType());
+            Type type = typeManager.getType(operatorMetadata.getReturnType());
             return setExpressionType(node, type);
         }
 
@@ -1255,6 +1355,8 @@ public class ExpressionAnalyzer
 
     private static class Context
     {
+        private final Scope scope;
+
         // functionInputTypes and nameToLambdaDeclarationMap can be null or non-null independently. All 4 combinations are possible.
 
         // The list of types when expecting a lambda (i.e. processing lambda parameters of a function); null otherwise.
@@ -1262,39 +1364,46 @@ public class ExpressionAnalyzer
         private final List<Type> functionInputTypes;
         // The mapping from names to corresponding lambda argument declarations when inside a lambda; null otherwise.
         // Empty map means that the all lambda expressions surrounding the current node has no arguments.
-        private final Map<String, LambdaArgumentDeclaration> nameToLambdaArgumentDeclarationMap;
+        private final Map<FieldId, LambdaArgumentDeclaration> fieldToLambdaArgumentDeclaration;
 
         private Context(
+                Scope scope,
                 List<Type> functionInputTypes,
-                Map<String, LambdaArgumentDeclaration> nameToLambdaArgumentDeclarationMap)
+                Map<FieldId, LambdaArgumentDeclaration> fieldToLambdaArgumentDeclaration)
         {
+            this.scope = requireNonNull(scope, "scope is null");
             this.functionInputTypes = functionInputTypes;
-            this.nameToLambdaArgumentDeclarationMap = nameToLambdaArgumentDeclarationMap;
+            this.fieldToLambdaArgumentDeclaration = fieldToLambdaArgumentDeclaration;
         }
 
-        public static Context notInLambda()
+        public static Context notInLambda(Scope scope)
         {
-            return new Context(null, null);
+            return new Context(scope, null, null);
         }
 
-        public static Context inLambda(Map<String, LambdaArgumentDeclaration> nameToLambdaArgumentDeclarationMap)
+        public static Context inLambda(Scope scope, Map<FieldId, LambdaArgumentDeclaration> fieldToLambdaArgumentDeclaration)
         {
-            return new Context(null, requireNonNull(nameToLambdaArgumentDeclarationMap, "nameToLambdaArgumentDeclarationMap is null"));
+            return new Context(scope, null, requireNonNull(fieldToLambdaArgumentDeclaration, "fieldToLambdaArgumentDeclaration is null"));
         }
 
         public Context expectingLambda(List<Type> functionInputTypes)
         {
-            return new Context(requireNonNull(functionInputTypes, "functionInputTypes is null"), this.nameToLambdaArgumentDeclarationMap);
+            return new Context(scope, requireNonNull(functionInputTypes, "functionInputTypes is null"), this.fieldToLambdaArgumentDeclaration);
         }
 
         public Context notExpectingLambda()
         {
-            return new Context(null, this.nameToLambdaArgumentDeclarationMap);
+            return new Context(scope, null, this.fieldToLambdaArgumentDeclaration);
+        }
+
+        Scope getScope()
+        {
+            return scope;
         }
 
         public boolean isInLambda()
         {
-            return nameToLambdaArgumentDeclarationMap != null;
+            return fieldToLambdaArgumentDeclaration != null;
         }
 
         public boolean isExpectingLambda()
@@ -1302,10 +1411,10 @@ public class ExpressionAnalyzer
             return functionInputTypes != null;
         }
 
-        public Map<String, LambdaArgumentDeclaration> getNameToLambdaArgumentDeclarationMap()
+        public Map<FieldId, LambdaArgumentDeclaration> getFieldToLambdaArgumentDeclaration()
         {
             checkState(isInLambda());
-            return nameToLambdaArgumentDeclarationMap;
+            return fieldToLambdaArgumentDeclaration;
         }
 
         public List<Type> getFunctionInputTypes()
@@ -1315,10 +1424,10 @@ public class ExpressionAnalyzer
         }
     }
 
-    public static Signature resolveFunction(FunctionCall node, List<TypeSignatureProvider> argumentTypes, FunctionRegistry functionRegistry)
+    public static FunctionHandle resolveFunction(Session session, FunctionCall node, List<TypeSignatureProvider> argumentTypes, FunctionManager functionManager)
     {
         try {
-            return functionRegistry.resolveFunction(node.getName(), argumentTypes);
+            return functionManager.resolveFunction(session, node.getName(), argumentTypes);
         }
         catch (PrestoException e) {
             if (e.getErrorCode().getCode() == StandardErrorCode.FUNCTION_NOT_FOUND.toErrorCode().getCode()) {
@@ -1335,116 +1444,56 @@ public class ExpressionAnalyzer
             Session session,
             Metadata metadata,
             SqlParser sqlParser,
-            Map<Symbol, Type> types,
+            TypeProvider types,
             Expression expression,
-            List<Expression> parameters)
+            List<Expression> parameters,
+            WarningCollector warningCollector)
     {
-        return getExpressionTypes(session, metadata, sqlParser, types, expression, parameters, false);
+        return getExpressionTypes(session, metadata, sqlParser, types, expression, parameters, warningCollector, false);
     }
 
     public static Map<NodeRef<Expression>, Type> getExpressionTypes(
             Session session,
             Metadata metadata,
             SqlParser sqlParser,
-            Map<Symbol, Type> types,
+            TypeProvider types,
             Expression expression,
             List<Expression> parameters,
+            WarningCollector warningCollector,
             boolean isDescribe)
     {
-        return getExpressionTypes(session, metadata, sqlParser, types, ImmutableList.of(expression), parameters, isDescribe);
+        return getExpressionTypes(session, metadata, sqlParser, types, ImmutableList.of(expression), parameters, warningCollector, isDescribe);
     }
 
     public static Map<NodeRef<Expression>, Type> getExpressionTypes(
             Session session,
             Metadata metadata,
             SqlParser sqlParser,
-            Map<Symbol, Type> types,
+            TypeProvider types,
             Iterable<Expression> expressions,
             List<Expression> parameters,
+            WarningCollector warningCollector,
             boolean isDescribe)
     {
-        return analyzeExpressionsWithSymbols(session, metadata, sqlParser, types, expressions, parameters, isDescribe).getExpressionTypes();
-    }
-
-    public static Map<NodeRef<Expression>, Type> getExpressionTypesFromInput(
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            Map<Integer, Type> types,
-            Expression expression,
-            List<Expression> parameters)
-    {
-        return getExpressionTypesFromInput(session, metadata, sqlParser, types, ImmutableList.of(expression), parameters);
-    }
-
-    public static Map<NodeRef<Expression>, Type> getExpressionTypesFromInput(
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            Map<Integer, Type> types,
-            Iterable<Expression> expressions,
-            List<Expression> parameters)
-    {
-        return analyzeExpressionsWithInputs(session, metadata, sqlParser, types, expressions, parameters).getExpressionTypes();
-    }
-
-    public static ExpressionAnalysis analyzeExpressionsWithSymbols(
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            Map<Symbol, Type> types,
-            Iterable<Expression> expressions,
-            List<Expression> parameters,
-            boolean isDescribe)
-    {
-        return analyzeExpressions(session, metadata, sqlParser, new RelationType(), types, expressions, parameters, isDescribe);
-    }
-
-    private static ExpressionAnalysis analyzeExpressionsWithInputs(
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            Map<Integer, Type> types,
-            Iterable<Expression> expressions,
-            List<Expression> parameters)
-    {
-        Field[] fields = new Field[types.size()];
-        for (Entry<Integer, Type> entry : types.entrySet()) {
-            fields[entry.getKey()] = Field.newUnqualified(Optional.empty(), entry.getValue());
-        }
-        RelationType tupleDescriptor = new RelationType(fields);
-
-        return analyzeExpressions(session, metadata, sqlParser, tupleDescriptor, ImmutableMap.of(), expressions, parameters);
+        return analyzeExpressions(session, metadata, sqlParser, types, expressions, parameters, warningCollector, isDescribe).getExpressionTypes();
     }
 
     public static ExpressionAnalysis analyzeExpressions(
             Session session,
             Metadata metadata,
             SqlParser sqlParser,
-            RelationType tupleDescriptor,
-            Map<Symbol, Type> types,
-            Iterable<? extends Expression> expressions,
-            List<Expression> parameters)
-    {
-        return analyzeExpressions(session, metadata, sqlParser, tupleDescriptor, types, expressions, parameters, false);
-    }
-
-    private static ExpressionAnalysis analyzeExpressions(
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            RelationType tupleDescriptor,
-            Map<Symbol, Type> types,
-            Iterable<? extends Expression> expressions,
+            TypeProvider types,
+            Iterable<Expression> expressions,
             List<Expression> parameters,
+            WarningCollector warningCollector,
             boolean isDescribe)
     {
         // expressions at this point can not have sub queries so deny all access checks
         // in the future, we will need a full access controller here to verify access to functions
         Analysis analysis = new Analysis(null, parameters, isDescribe);
-        ExpressionAnalyzer analyzer = create(analysis, session, metadata, sqlParser, new DenyAllAccessControl(), types);
+        ExpressionAnalyzer analyzer = create(analysis, session, metadata, sqlParser, new DenyAllAccessControl(), types, warningCollector);
         for (Expression expression : expressions) {
-            analyzer.analyze(expression, Scope.builder().withRelationType(RelationId.anonymous(), tupleDescriptor).build());
+            analyzer.analyze(expression, Scope.builder().withRelationType(RelationId.anonymous(), new RelationType()).build());
         }
 
         return new ExpressionAnalysis(
@@ -1456,7 +1505,8 @@ public class ExpressionAnalyzer
                 analyzer.getColumnReferences(),
                 analyzer.getTypeOnlyCoercions(),
                 analyzer.getQuantifiedComparisons(),
-                analyzer.getLambdaArgumentReferences());
+                analyzer.getLambdaArgumentReferences(),
+                analyzer.getWindowFunctions());
     }
 
     public static ExpressionAnalysis analyzeExpression(
@@ -1466,21 +1516,23 @@ public class ExpressionAnalyzer
             SqlParser sqlParser,
             Scope scope,
             Analysis analysis,
-            Expression expression)
+            Expression expression,
+            WarningCollector warningCollector)
     {
-        ExpressionAnalyzer analyzer = create(analysis, session, metadata, sqlParser, accessControl, ImmutableMap.of());
+        ExpressionAnalyzer analyzer = create(analysis, session, metadata, sqlParser, accessControl, TypeProvider.empty(), warningCollector);
         analyzer.analyze(expression, scope);
 
         Map<NodeRef<Expression>, Type> expressionTypes = analyzer.getExpressionTypes();
         Map<NodeRef<Expression>, Type> expressionCoercions = analyzer.getExpressionCoercions();
         Set<NodeRef<Expression>> typeOnlyCoercions = analyzer.getTypeOnlyCoercions();
-        Map<NodeRef<FunctionCall>, Signature> resolvedFunctions = analyzer.getResolvedFunctions();
+        Map<NodeRef<FunctionCall>, FunctionHandle> resolvedFunctions = analyzer.getResolvedFunctions();
 
         analysis.addTypes(expressionTypes);
         analysis.addCoercions(expressionCoercions, typeOnlyCoercions);
-        analysis.addFunctionSignatures(resolvedFunctions);
+        analysis.addFunctionHandles(resolvedFunctions);
         analysis.addColumnReferences(analyzer.getColumnReferences());
         analysis.addLambdaArgumentReferences(analyzer.getLambdaArgumentReferences());
+        analysis.addTableColumnReferences(accessControl, session.getIdentity(), analyzer.getTableColumnReferences());
 
         return new ExpressionAnalysis(
                 expressionTypes,
@@ -1491,72 +1543,97 @@ public class ExpressionAnalyzer
                 analyzer.getColumnReferences(),
                 analyzer.getTypeOnlyCoercions(),
                 analyzer.getQuantifiedComparisons(),
-                analyzer.getLambdaArgumentReferences());
+                analyzer.getLambdaArgumentReferences(),
+                analyzer.getWindowFunctions());
     }
 
-    public static ExpressionAnalyzer create(
-            Analysis analysis,
-            Session session,
-            Metadata metadata,
-            SqlParser sqlParser,
-            AccessControl accessControl)
-    {
-        return create(analysis, session, metadata, sqlParser, accessControl, ImmutableMap.of());
-    }
-
-    public static ExpressionAnalyzer create(
+    private static ExpressionAnalyzer create(
             Analysis analysis,
             Session session,
             Metadata metadata,
             SqlParser sqlParser,
             AccessControl accessControl,
-            Map<Symbol, Type> types)
+            TypeProvider types,
+            WarningCollector warningCollector)
     {
         return new ExpressionAnalyzer(
-                metadata.getFunctionRegistry(),
+                metadata.getFunctionManager(),
                 metadata.getTypeManager(),
-                node -> new StatementAnalyzer(analysis, metadata, sqlParser, accessControl, session),
+                node -> new StatementAnalyzer(analysis, metadata, sqlParser, accessControl, session, warningCollector),
                 session,
                 types,
                 analysis.getParameters(),
+                warningCollector,
                 analysis.isDescribe());
     }
 
-    public static ExpressionAnalyzer createConstantAnalyzer(Metadata metadata, Session session, List<Expression> parameters)
+    public static ExpressionAnalyzer createConstantAnalyzer(Metadata metadata, Session session, List<Expression> parameters, WarningCollector warningCollector)
     {
         return createWithoutSubqueries(
-                metadata.getFunctionRegistry(),
+                metadata.getFunctionManager(),
                 metadata.getTypeManager(),
                 session,
                 parameters,
                 EXPRESSION_NOT_CONSTANT,
                 "Constant expression cannot contain a subquery",
+                warningCollector,
                 false);
     }
 
-    public static ExpressionAnalyzer createConstantAnalyzer(Metadata metadata, Session session, List<Expression> parameters, boolean isDescribe)
+    public static ExpressionAnalyzer createConstantAnalyzer(Metadata metadata, Session session, List<Expression> parameters, WarningCollector warningCollector, boolean isDescribe)
     {
         return createWithoutSubqueries(
-                metadata.getFunctionRegistry(),
+                metadata.getFunctionManager(),
                 metadata.getTypeManager(),
                 session,
                 parameters,
                 EXPRESSION_NOT_CONSTANT,
                 "Constant expression cannot contain a subquery",
+                warningCollector,
                 isDescribe);
     }
 
     public static ExpressionAnalyzer createWithoutSubqueries(
-            FunctionRegistry functionRegistry,
+            FunctionManager functionManager,
             TypeManager typeManager,
             Session session,
             List<Expression> parameters,
             SemanticErrorCode errorCode,
             String message,
+            WarningCollector warningCollector,
             boolean isDescribe)
     {
-        return new ExpressionAnalyzer(functionRegistry, typeManager, node -> {
-            throw new SemanticException(errorCode, node, message);
-        }, session, ImmutableMap.of(), parameters, isDescribe);
+        return createWithoutSubqueries(
+                functionManager,
+                typeManager,
+                session,
+                TypeProvider.empty(),
+                parameters,
+                node -> new SemanticException(errorCode, node, message),
+                warningCollector,
+                isDescribe);
+    }
+
+    public static ExpressionAnalyzer createWithoutSubqueries(
+            FunctionManager functionManager,
+            TypeManager typeManager,
+            Session session,
+            TypeProvider symbolTypes,
+            List<Expression> parameters,
+            Function<? super Node, ? extends RuntimeException> statementAnalyzerRejection,
+            WarningCollector warningCollector,
+            boolean isDescribe)
+    {
+        return new ExpressionAnalyzer(
+                functionManager,
+                typeManager,
+                node -> {
+                    throw statementAnalyzerRejection.apply(node);
+                },
+                session,
+                symbolTypes,
+                parameters,
+                warningCollector,
+                isDescribe);
     }
 }

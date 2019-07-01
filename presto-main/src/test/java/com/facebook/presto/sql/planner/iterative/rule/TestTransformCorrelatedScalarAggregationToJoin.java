@@ -13,18 +13,11 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
-import com.facebook.presto.block.BlockEncodingManager;
-import com.facebook.presto.metadata.FunctionRegistry;
-import com.facebook.presto.sql.analyzer.FeaturesConfig;
-import com.facebook.presto.sql.planner.iterative.Rule;
+import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
 import com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder;
-import com.facebook.presto.sql.planner.iterative.rule.test.RuleTester;
-import com.facebook.presto.sql.planner.plan.Assignments;
 import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
@@ -35,77 +28,66 @@ import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.functi
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.join;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.project;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
+import static com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder.assignment;
 
 public class TestTransformCorrelatedScalarAggregationToJoin
+        extends BaseRuleTest
 {
-    private RuleTester tester;
-    private FunctionRegistry functionRegistry;
-    private Rule rule;
-
-    @BeforeClass
-    public void setUp()
-    {
-        tester = new RuleTester();
-        TypeRegistry typeRegistry = new TypeRegistry();
-        functionRegistry = new FunctionRegistry(typeRegistry, new BlockEncodingManager(typeRegistry), new FeaturesConfig());
-        rule = new TransformCorrelatedScalarAggregationToJoin(functionRegistry);
-    }
-
     @Test
     public void doesNotFireOnPlanWithoutApplyNode()
     {
-        tester.assertThat(rule)
-                .on(p -> p.values(p.symbol("a")))
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
+                .on(p -> p.values(p.variable("a")))
                 .doesNotFire();
     }
 
     @Test
     public void doesNotFireOnCorrelatedWithoutAggregation()
     {
-        tester.assertThat(rule)
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
                 .on(p -> p.lateral(
-                        ImmutableList.of(p.symbol("corr")),
-                        p.values(p.symbol("corr")),
-                        p.values(p.symbol("a"))))
+                        ImmutableList.of(p.variable(p.symbol("corr"))),
+                        p.values(p.variable("corr")),
+                        p.values(p.variable("a"))))
                 .doesNotFire();
     }
 
     @Test
     public void doesNotFireOnUncorrelated()
     {
-        tester.assertThat(rule)
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
                 .on(p -> p.lateral(
                         ImmutableList.of(),
-                        p.values(p.symbol("a")),
-                        p.values(p.symbol("b"))))
+                        p.values(p.variable("a")),
+                        p.values(p.variable("b"))))
                 .doesNotFire();
     }
 
     @Test
     public void doesNotFireOnCorrelatedWithNonScalarAggregation()
     {
-        tester.assertThat(rule)
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
                 .on(p -> p.lateral(
-                        ImmutableList.of(p.symbol("corr")),
-                        p.values(p.symbol("corr")),
-                    p.aggregation(ab -> ab
-                        .source(p.values(p.symbol("a"), p.symbol("b")))
-                        .addAggregation(p.symbol("sum"), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
-                        .addGroupingSet(p.symbol("b")))))
+                        ImmutableList.of(p.variable(p.symbol("corr"))),
+                        p.values(p.variable("corr")),
+                        p.aggregation(ab -> ab
+                                .source(p.values(p.variable("a"), p.variable("b")))
+                                .addAggregation(p.variable(p.symbol("sum")), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
+                                .singleGroupingSet(p.variable("b")))))
                 .doesNotFire();
     }
 
     @Test
     public void rewritesOnSubqueryWithoutProjection()
     {
-        tester.assertThat(rule)
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
                 .on(p -> p.lateral(
-                        ImmutableList.of(p.symbol("corr")),
-                        p.values(p.symbol("corr")),
-                    p.aggregation(ab -> ab
-                        .source(p.values(p.symbol("a"), p.symbol("b")))
-                        .addAggregation(p.symbol("sum"), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
-                        .globalGrouping())))
+                        ImmutableList.of(p.variable(p.symbol("corr"))),
+                        p.values(p.variable("corr")),
+                        p.aggregation(ab -> ab
+                                .source(p.values(p.variable("a"), p.variable("b")))
+                                .addAggregation(p.variable(p.symbol("sum")), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
+                                .globalGrouping())))
                 .matches(
                         project(ImmutableMap.of("sum_1", expression("sum_1"), "corr", expression("corr")),
                                 aggregation(ImmutableMap.of("sum_1", functionCall("sum", ImmutableList.of("a"))),
@@ -120,15 +102,15 @@ public class TestTransformCorrelatedScalarAggregationToJoin
     @Test
     public void rewritesOnSubqueryWithProjection()
     {
-        tester.assertThat(rule)
+        tester().assertThat(new TransformCorrelatedScalarAggregationToJoin(tester().getMetadata().getFunctionManager()))
                 .on(p -> p.lateral(
-                        ImmutableList.of(p.symbol("corr")),
-                        p.values(p.symbol("corr")),
-                        p.project(Assignments.of(p.symbol("expr"), p.expression("sum + 1")),
-                            p.aggregation(ab -> ab
-                                .source(p.values(p.symbol("a"), p.symbol("b")))
-                                .addAggregation(p.symbol("sum"), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
-                                .globalGrouping()))))
+                        ImmutableList.of(p.variable("corr")),
+                        p.values(p.variable("corr")),
+                        p.project(assignment(p.variable("expr"), p.expression("sum + 1")),
+                                p.aggregation(ab -> ab
+                                        .source(p.values(p.variable("a"), p.variable("b")))
+                                        .addAggregation(p.variable(p.symbol("sum")), PlanBuilder.expression("sum(a)"), ImmutableList.of(BIGINT))
+                                        .globalGrouping()))))
                 .matches(
                         project(ImmutableMap.of("corr", expression("corr"), "expr", expression("(\"sum_1\" + 1)")),
                                 aggregation(ImmutableMap.of("sum_1", functionCall("sum", ImmutableList.of("a"))),

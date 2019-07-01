@@ -14,6 +14,7 @@
 package com.facebook.presto.spi.type;
 
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.block.AbstractMapBlock.HashTables;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
@@ -26,7 +27,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
+import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.TypeUtils.checkElementNotNull;
 import static com.facebook.presto.spi.type.TypeUtils.hashPosition;
 import static java.lang.String.format;
@@ -36,8 +39,6 @@ import static java.util.Objects.requireNonNull;
 public class MapType
         extends AbstractType
 {
-    private final boolean useNewMapBlock;
-
     private final Type keyType;
     private final Type valueType;
     private static final String MAP_NULL_ELEMENT_MSG = "MAP comparison not supported for null value elements";
@@ -46,44 +47,46 @@ public class MapType
     private final MethodHandle keyNativeHashCode;
     private final MethodHandle keyBlockHashCode;
     private final MethodHandle keyBlockNativeEquals;
+    private final MethodHandle keyBlockEquals;
 
-    public MapType(boolean useNewMapBlock, Type keyType, Type valueType, MethodHandle keyBlockNativeEquals, MethodHandle keyNativeHashCode, MethodHandle keyBlockHashCode)
+    public MapType(
+            Type keyType,
+            Type valueType,
+            MethodHandle keyBlockNativeEquals,
+            MethodHandle keyBlockEquals,
+            MethodHandle keyNativeHashCode,
+            MethodHandle keyBlockHashCode)
     {
         super(new TypeSignature(StandardTypes.MAP,
-                TypeSignatureParameter.of(keyType.getTypeSignature()),
-                TypeSignatureParameter.of(valueType.getTypeSignature())),
+                        TypeSignatureParameter.of(keyType.getTypeSignature()),
+                        TypeSignatureParameter.of(valueType.getTypeSignature())),
                 Block.class);
         if (!keyType.isComparable()) {
             throw new IllegalArgumentException(format("key type must be comparable, got %s", keyType));
         }
-        this.useNewMapBlock = useNewMapBlock;
         this.keyType = keyType;
         this.valueType = valueType;
-        if (useNewMapBlock) {
-            requireNonNull(keyBlockNativeEquals, "keyBlockNativeEquals is null");
-            requireNonNull(keyNativeHashCode, "keyNativeHashCode is null");
-            requireNonNull(keyBlockHashCode, "keyBlockHashCode is null");
-        }
-        else {
-            if (keyBlockNativeEquals != null) {
-                throw new IllegalArgumentException("When useNewMapBlock is false, keyBlockNativeEquals should be null.");
-            }
-            if (keyNativeHashCode != null) {
-                throw new IllegalArgumentException("When useNewMapBlock is false, keyNativeHashCode should be null.");
-            }
-            if (keyBlockHashCode != null) {
-                throw new IllegalArgumentException("When useNewMapBlock is false, keyBlockHashCode should be null.");
-            }
-        }
+        requireNonNull(keyBlockNativeEquals, "keyBlockNativeEquals is null");
+        requireNonNull(keyNativeHashCode, "keyNativeHashCode is null");
+        requireNonNull(keyBlockHashCode, "keyBlockHashCode is null");
         this.keyBlockNativeEquals = keyBlockNativeEquals;
         this.keyNativeHashCode = keyNativeHashCode;
         this.keyBlockHashCode = keyBlockHashCode;
+        this.keyBlockEquals = keyBlockEquals;
     }
 
     @Override
     public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
     {
-        return new MapBlockBuilder(useNewMapBlock, keyType, valueType, keyBlockNativeEquals, keyNativeHashCode, keyBlockHashCode, blockBuilderStatus, expectedEntries);
+        return new MapBlockBuilder(
+                keyType,
+                valueType,
+                keyBlockNativeEquals,
+                keyBlockEquals,
+                keyNativeHashCode,
+                keyBlockHashCode,
+                blockBuilderStatus,
+                expectedEntries);
     }
 
     @Override
@@ -115,8 +118,7 @@ public class MapType
         long result = 0;
 
         for (int i = 0; i < mapBlock.getPositionCount(); i += 2) {
-            result += hashPosition(keyType, mapBlock, i);
-            result += hashPosition(valueType, mapBlock, i + 1);
+            result += hashPosition(keyType, mapBlock, i) ^ hashPosition(valueType, mapBlock, i + 1);
         }
         return result;
     }
@@ -220,7 +222,6 @@ public class MapType
         }
         else {
             block.writePositionTo(position, blockBuilder);
-            blockBuilder.closeEntry();
         }
     }
 
@@ -231,9 +232,18 @@ public class MapType
     }
 
     @Override
+    public Block getBlockUnchecked(Block block, int internalPosition)
+    {
+        return block.getBlockUnchecked(internalPosition);
+    }
+
+    @Override
     public void writeObject(BlockBuilder blockBuilder, Object value)
     {
-        blockBuilder.writeObject(value).closeEntry();
+        if (!(value instanceof SingleMapBlock)) {
+            throw new IllegalArgumentException("Maps must be represented with SingleMapBlock");
+        }
+        blockBuilder.appendStructure((Block) value);
     }
 
     @Override
@@ -248,10 +258,9 @@ public class MapType
         return "map(" + keyType.getDisplayName() + ", " + valueType.getDisplayName() + ")";
     }
 
-    public MapBlock createBlockFromKeyValue(boolean[] mapIsNull, int[] offsets, Block keyBlock, Block valueBlock)
+    public Block createBlockFromKeyValue(Optional<boolean[]> mapIsNull, int[] offsets, Block keyBlock, Block valueBlock)
     {
         return MapBlock.fromKeyValueBlock(
-                useNewMapBlock,
                 mapIsNull,
                 offsets,
                 keyBlock,
@@ -260,5 +269,27 @@ public class MapType
                 keyBlockNativeEquals,
                 keyNativeHashCode,
                 keyBlockHashCode);
+    }
+
+    /**
+     * Create a map block directly without per element validations.
+     * <p>
+     * Internal use by com.facebook.presto.spi.Block only.
+     */
+    public static Block createMapBlockInternal(
+            TypeManager typeManager,
+            Type keyType,
+            int startOffset,
+            int positionCount,
+            Optional<boolean[]> mapIsNull,
+            int[] offsets,
+            Block keyBlock,
+            Block valueBlock,
+            HashTables hashTables)
+    {
+        // TypeManager caches types. Therefore, it is important that we go through it instead of coming up with the MethodHandles directly.
+        // BIGINT is chosen arbitrarily here. Any type will do.
+        MapType mapType = (MapType) typeManager.getType(new TypeSignature(StandardTypes.MAP, TypeSignatureParameter.of(keyType.getTypeSignature()), TypeSignatureParameter.of(BIGINT.getTypeSignature())));
+        return MapBlock.createMapBlockInternal(startOffset, positionCount, mapIsNull, offsets, keyBlock, valueBlock, hashTables, keyType, mapType.keyBlockNativeEquals, mapType.keyNativeHashCode, mapType.keyBlockHashCode);
     }
 }

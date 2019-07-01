@@ -15,6 +15,7 @@ package com.facebook.presto.hive;
 
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.type.NamedTypeSignature;
+import com.facebook.presto.spi.type.RowFieldName;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
@@ -32,10 +33,9 @@ import org.apache.hadoop.hive.serde2.typeinfo.StructTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.VarcharTypeInfo;
 
-import javax.annotation.Nonnull;
-
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
@@ -84,18 +84,17 @@ public final class HiveType
     public static final HiveType HIVE_DATE = new HiveType(dateTypeInfo);
     public static final HiveType HIVE_BINARY = new HiveType(binaryTypeInfo);
 
-    private final String hiveTypeName;
+    private final HiveTypeName hiveTypeName;
     private final TypeInfo typeInfo;
 
     private HiveType(TypeInfo typeInfo)
     {
         requireNonNull(typeInfo, "typeInfo is null");
-        this.hiveTypeName = typeInfo.getTypeName();
+        this.hiveTypeName = new HiveTypeName(typeInfo.getTypeName());
         this.typeInfo = typeInfo;
     }
 
-    @JsonValue
-    public String getHiveTypeName()
+    public HiveTypeName getHiveTypeName()
     {
         return hiveTypeName;
     }
@@ -145,10 +144,11 @@ public final class HiveType
         return hiveTypeName.hashCode();
     }
 
+    @JsonValue
     @Override
     public String toString()
     {
-        return hiveTypeName;
+        return hiveTypeName.toString();
     }
 
     public boolean isSupportedType()
@@ -176,14 +176,12 @@ public final class HiveType
     }
 
     @JsonCreator
-    @Nonnull
     public static HiveType valueOf(String hiveTypeName)
     {
         requireNonNull(hiveTypeName, "hiveTypeName is null");
         return toHiveType(getTypeInfoFromTypeString(hiveTypeName));
     }
 
-    @Nonnull
     public static List<HiveType> toHiveTypes(String hiveTypes)
     {
         requireNonNull(hiveTypes, "hiveTypes is null");
@@ -192,14 +190,12 @@ public final class HiveType
                 .collect(toList()));
     }
 
-    @Nonnull
     private static HiveType toHiveType(TypeInfo typeInfo)
     {
         requireNonNull(typeInfo, "typeInfo is null");
         return new HiveType(typeInfo);
     }
 
-    @Nonnull
     public static HiveType toHiveType(TypeTranslator typeTranslator, Type type)
     {
         requireNonNull(typeTranslator, "typeTranslator is null");
@@ -207,7 +203,6 @@ public final class HiveType
         return new HiveType(typeTranslator.translate(type));
     }
 
-    @Nonnull
     private static TypeSignature getTypeSignature(TypeInfo typeInfo)
     {
         switch (typeInfo.getCategory()) {
@@ -245,7 +240,7 @@ public final class HiveType
                     // Users can't work around this by casting in their queries because Presto parser always lower case types.
                     // TODO: This is a hack. Presto engine should be able to handle identifiers in a case insensitive way where necessary.
                     String rowFieldName = structFieldNames.get(i).toLowerCase(Locale.US);
-                    typeSignatureBuilder.add(TypeSignatureParameter.of(new NamedTypeSignature(rowFieldName, typeSignature)));
+                    typeSignatureBuilder.add(TypeSignatureParameter.of(new NamedTypeSignature(Optional.of(new RowFieldName(rowFieldName, false)), typeSignature)));
                 }
                 return new TypeSignature(StandardTypes.ROW, typeSignatureBuilder.build());
         }

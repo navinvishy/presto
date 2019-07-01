@@ -14,7 +14,7 @@
 package com.facebook.presto.sql.gen;
 
 import com.facebook.presto.bytecode.ClassDefinition;
-import com.facebook.presto.sql.relational.RowExpression;
+import com.facebook.presto.spi.relation.RowExpression;
 
 import java.util.List;
 

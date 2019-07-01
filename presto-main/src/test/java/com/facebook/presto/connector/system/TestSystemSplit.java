@@ -13,7 +13,7 @@
  */
 package com.facebook.presto.connector.system;
 
-import com.facebook.presto.connector.ConnectorId;
+import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import io.airlift.json.JsonCodec;
@@ -26,7 +26,6 @@ public class TestSystemSplit
 {
     @Test
     public void testSerialization()
-            throws Exception
     {
         ConnectorId connectorId = new ConnectorId("testid");
         SystemTableHandle tableHandle = new SystemTableHandle(connectorId, "xyz", "foo");

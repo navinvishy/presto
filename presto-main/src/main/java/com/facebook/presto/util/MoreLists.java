@@ -16,7 +16,12 @@ package com.facebook.presto.util;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.function.Predicate;
+import java.util.stream.IntStream;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
@@ -26,6 +31,33 @@ public class MoreLists
     {
         return requireNonNull(lists, "lists is null").stream()
                 .map(ImmutableList::copyOf)
+                .collect(toImmutableList());
+    }
+
+    public static <T> List<T> filteredCopy(List<T> elements, Predicate<T> predicate)
+    {
+        requireNonNull(elements, "elements is null");
+        requireNonNull(predicate, "predicate is null");
+        return elements.stream()
+                .filter(predicate)
+                .collect(toImmutableList());
+    }
+
+    public static <T, R> List<R> mappedCopy(List<T> elements, Function<T, R> mapper)
+    {
+        requireNonNull(elements, "elements is null");
+        requireNonNull(mapper, "mapper is null");
+        return elements.stream()
+                .map(mapper)
+                .collect(toImmutableList());
+    }
+
+    public static <T> List<T> nElements(int n, IntFunction<T> function)
+    {
+        checkArgument(n >= 0, "n must be greater than or equal to zero");
+        requireNonNull(function, "function is null");
+        return IntStream.range(0, n)
+                .mapToObj(function)
                 .collect(toImmutableList());
     }
 

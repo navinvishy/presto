@@ -14,7 +14,7 @@
 package com.facebook.presto.operator.index;
 
 import com.facebook.presto.block.BlockEncodingManager;
-import com.facebook.presto.metadata.FunctionRegistry;
+import com.facebook.presto.metadata.FunctionManager;
 import com.facebook.presto.spi.InMemoryRecordSet;
 import com.facebook.presto.spi.RecordCursor;
 import com.facebook.presto.spi.type.ArrayType;
@@ -38,11 +38,11 @@ public class TestFieldSetFilteringRecordSet
     public void test()
     {
         TypeManager typeManager = new TypeRegistry();
-        FunctionRegistry functionRegistry = new FunctionRegistry(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig());
+        FunctionManager functionManager = new FunctionManager(typeManager, new BlockEncodingManager(typeManager), new FeaturesConfig());
 
         ArrayType arrayOfBigintType = new ArrayType(BIGINT);
         FieldSetFilteringRecordSet fieldSetFilteringRecordSet = new FieldSetFilteringRecordSet(
-                functionRegistry,
+                functionManager,
                 new InMemoryRecordSet(
                         ImmutableList.of(BIGINT, BIGINT, TIMESTAMP_WITH_TIME_ZONE, TIMESTAMP_WITH_TIME_ZONE, arrayOfBigintType, arrayOfBigintType),
                         ImmutableList.of(
@@ -54,8 +54,7 @@ public class TestFieldSetFilteringRecordSet
                                         packDateTimeWithZone(100, getTimeZoneKeyForOffset(234)),
                                         // test structural type
                                         arrayBlockOf(BIGINT, 12, 34, 56),
-                                        arrayBlockOf(BIGINT, 12, 34, 56)
-                                ))),
+                                        arrayBlockOf(BIGINT, 12, 34, 56)))),
                 ImmutableList.of(ImmutableSet.of(0, 1), ImmutableSet.of(2, 3), ImmutableSet.of(4, 5)));
         RecordCursor recordCursor = fieldSetFilteringRecordSet.cursor();
         assertTrue(recordCursor.advanceNextPosition());

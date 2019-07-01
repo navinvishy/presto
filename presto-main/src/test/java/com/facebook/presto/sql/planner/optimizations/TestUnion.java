@@ -13,13 +13,13 @@
  */
 package com.facebook.presto.sql.planner.optimizations;
 
+import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.sql.planner.LogicalPlanner;
 import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.sql.planner.assertions.BasePlanTest;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
 import com.google.common.collect.Iterables;
 import org.testng.annotations.Test;
@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 
 import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
-import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static java.util.stream.Collectors.toList;
@@ -162,21 +161,25 @@ public class TestUnion
 
     private void assertPlanIsFullyDistributed(Plan plan)
     {
+        int numberOfGathers = searchFrom(plan.getRoot())
+                .where(TestUnion::isRemoteGatheringExchange)
+                .findAll()
+                .size();
+
+        if (numberOfGathers == 0) {
+            // there are no "gather" nodes, so the plan is expected to be fully distributed
+            return;
+        }
+
         assertTrue(
                 searchFrom(plan.getRoot())
-                        .skipOnlyWhen(TestUnion::isNotRemoteGatheringExchange)
+                        .recurseOnlyWhen(TestUnion::isNotRemoteGatheringExchange)
                         .findAll()
                         .stream()
                         .noneMatch(this::shouldBeDistributed),
                 "There is a node that should be distributed between output and first REMOTE GATHER ExchangeNode");
 
-        List<PlanNode> gathers = searchFrom(plan.getRoot())
-                .where(TestUnion::isRemoteGatheringExchange)
-                .findAll()
-                .stream()
-                .collect(toList());
-
-        assertEquals(gathers.size(), 1, "Only a single REMOTE GATHER was expected");
+        assertEquals(numberOfGathers, 1, "Only a single REMOTE GATHER was expected");
     }
 
     private boolean shouldBeDistributed(PlanNode planNode)
@@ -206,7 +209,7 @@ public class TestUnion
         for (PlanNode fragment : fragments) {
             List<PlanNode> aggregations = searchFrom(fragment)
                     .where(AggregationNode.class::isInstance)
-                    .skipOnlyWhen(TestUnion::isNotRemoteExchange)
+                    .recurseOnlyWhen(TestUnion::isNotRemoteExchange)
                     .findAll();
 
             assertFalse(aggregations.size() > 1, "More than a single AggregationNode between remote exchanges");
@@ -230,6 +233,6 @@ public class TestUnion
 
     private static boolean isRemoteExchange(PlanNode planNode)
     {
-        return (planNode instanceof ExchangeNode) && ((ExchangeNode) planNode).getScope().equals(REMOTE);
+        return (planNode instanceof ExchangeNode) && ((ExchangeNode) planNode).getScope().isRemote();
     }
 }

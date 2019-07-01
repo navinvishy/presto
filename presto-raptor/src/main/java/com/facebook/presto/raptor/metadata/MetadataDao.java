@@ -33,7 +33,7 @@ public interface MetadataDao
 
     String TABLE_COLUMN_SELECT = "" +
             "SELECT t.schema_name, t.table_name,\n" +
-            "  c.column_id, c.column_name, c.data_type,\n" +
+            "  c.column_id, c.column_name, c.data_type, c.ordinal_position,\n" +
             "  c.bucket_ordinal_position, c.sort_ordinal_position,\n" +
             "  t.temporal_column_id = c.column_id AS temporal\n" +
             "FROM tables t\n" +
@@ -177,6 +177,13 @@ public interface MetadataDao
             @Bind("tableId") long tableId,
             @Bind("columnId") long columnId,
             @Bind("target") String target);
+
+    @SqlUpdate("DELETE FROM columns\n" +
+            " WHERE table_id = :tableId\n" +
+            "  AND column_id = :columnId")
+    void dropColumn(
+            @Bind("tableId") long tableId,
+            @Bind("columnId") long column);
 
     @SqlUpdate("INSERT INTO views (schema_name, table_name, data)\n" +
             "VALUES (:schemaName, :tableName, :data)")

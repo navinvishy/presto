@@ -16,11 +16,12 @@ package com.facebook.presto.hive.orc;
 import com.facebook.hive.orc.OrcSerde;
 import com.facebook.presto.hive.FileFormatDataSourceStats;
 import com.facebook.presto.hive.HdfsEnvironment;
+import com.facebook.presto.hive.HiveClientConfig;
 import com.facebook.presto.hive.HiveColumnHandle;
 import com.facebook.presto.hive.HivePageSourceFactory;
-import com.facebook.presto.orc.metadata.DwrfMetadataReader;
 import com.facebook.presto.spi.ConnectorPageSource;
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.TypeManager;
 import org.apache.hadoop.conf.Configuration;
@@ -33,12 +34,16 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 
+import static com.facebook.presto.hive.HiveErrorCode.HIVE_BAD_DATA;
+import static com.facebook.presto.hive.HiveSessionProperties.getOrcLazyReadSmallRanges;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxBufferSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxMergeDistance;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxReadBlockSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcStreamBufferSize;
+import static com.facebook.presto.hive.HiveSessionProperties.getOrcTinyStripeThreshold;
 import static com.facebook.presto.hive.HiveUtil.isDeserializerClass;
 import static com.facebook.presto.hive.orc.OrcPageSourceFactory.createOrcPageSource;
+import static com.facebook.presto.orc.OrcEncoding.DWRF;
 import static java.util.Objects.requireNonNull;
 
 public class DwrfPageSourceFactory
@@ -47,13 +52,15 @@ public class DwrfPageSourceFactory
     private final TypeManager typeManager;
     private final HdfsEnvironment hdfsEnvironment;
     private final FileFormatDataSourceStats stats;
+    private final int domainCompactionThreshold;
 
     @Inject
-    public DwrfPageSourceFactory(TypeManager typeManager, HdfsEnvironment hdfsEnvironment, FileFormatDataSourceStats stats)
+    public DwrfPageSourceFactory(TypeManager typeManager, HiveClientConfig config, HdfsEnvironment hdfsEnvironment, FileFormatDataSourceStats stats)
     {
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.stats = requireNonNull(stats, "stats is null");
+        this.domainCompactionThreshold = requireNonNull(config, "config is null").getDomainCompactionThreshold();
     }
 
     @Override
@@ -62,6 +69,7 @@ public class DwrfPageSourceFactory
             Path path,
             long start,
             long length,
+            long fileSize,
             Properties schema,
             List<HiveColumnHandle> columns,
             TupleDomain<HiveColumnHandle> effectivePredicate,
@@ -71,14 +79,19 @@ public class DwrfPageSourceFactory
             return Optional.empty();
         }
 
+        if (fileSize == 0) {
+            throw new PrestoException(HIVE_BAD_DATA, "ORC file is empty: " + path);
+        }
+
         return Optional.of(createOrcPageSource(
-                new DwrfMetadataReader(),
+                DWRF,
                 hdfsEnvironment,
                 session.getUser(),
                 configuration,
                 path,
                 start,
                 length,
+                fileSize,
                 columns,
                 false,
                 effectivePredicate,
@@ -87,8 +100,11 @@ public class DwrfPageSourceFactory
                 getOrcMaxMergeDistance(session),
                 getOrcMaxBufferSize(session),
                 getOrcStreamBufferSize(session),
+                getOrcTinyStripeThreshold(session),
                 getOrcMaxReadBlockSize(session),
+                getOrcLazyReadSmallRanges(session),
                 false,
-                stats));
+                stats,
+                domainCompactionThreshold));
     }
 }

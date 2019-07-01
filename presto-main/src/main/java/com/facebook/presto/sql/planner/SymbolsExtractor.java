@@ -13,8 +13,11 @@
  */
 package com.facebook.presto.sql.planner;
 
+import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.relation.DefaultRowExpressionTraversalVisitor;
+import com.facebook.presto.spi.relation.RowExpression;
+import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.tree.DefaultExpressionTraversalVisitor;
 import com.facebook.presto.sql.tree.DefaultTraversalVisitor;
 import com.facebook.presto.sql.tree.DereferenceExpression;
@@ -31,7 +34,13 @@ import java.util.Set;
 
 import static com.facebook.presto.sql.planner.ExpressionExtractor.extractExpressions;
 import static com.facebook.presto.sql.planner.ExpressionExtractor.extractExpressionsNonRecursive;
+import static com.facebook.presto.sql.planner.iterative.Lookup.noLookup;
+import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
+import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toSet;
 
 public final class SymbolsExtractor
 {
@@ -40,15 +49,23 @@ public final class SymbolsExtractor
     public static Set<Symbol> extractUnique(PlanNode node)
     {
         ImmutableSet.Builder<Symbol> uniqueSymbols = ImmutableSet.builder();
-        extractExpressions(node).forEach(expression -> uniqueSymbols.addAll(extractUnique(expression)));
+        extractExpressions(node).forEach(expression -> uniqueSymbols.addAll(extractUniqueInternal(expression)));
 
         return uniqueSymbols.build();
+    }
+
+    public static Set<VariableReferenceExpression> extractUniqueVariable(PlanNode node, TypeProvider types)
+    {
+        ImmutableSet.Builder<VariableReferenceExpression> unique = ImmutableSet.builder();
+        extractExpressions(node).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression, types)));
+
+        return unique.build();
     }
 
     public static Set<Symbol> extractUniqueNonRecursive(PlanNode node)
     {
         ImmutableSet.Builder<Symbol> uniqueSymbols = ImmutableSet.builder();
-        extractExpressionsNonRecursive(node).forEach(expression -> uniqueSymbols.addAll(extractUnique(expression)));
+        extractExpressionsNonRecursive(node).forEach(expression -> uniqueSymbols.addAll(extractUniqueInternal(expression)));
 
         return uniqueSymbols.build();
     }
@@ -56,12 +73,35 @@ public final class SymbolsExtractor
     public static Set<Symbol> extractUnique(PlanNode node, Lookup lookup)
     {
         ImmutableSet.Builder<Symbol> uniqueSymbols = ImmutableSet.builder();
-        extractExpressions(node, lookup).forEach(expression -> uniqueSymbols.addAll(extractUnique(expression)));
+        extractExpressions(node, lookup).forEach(expression -> uniqueSymbols.addAll(extractUniqueInternal(expression)));
 
         return uniqueSymbols.build();
     }
 
+    public static Set<VariableReferenceExpression> extractUniqueVariable(PlanNode node, Lookup lookup, TypeProvider types)
+    {
+        ImmutableSet.Builder<VariableReferenceExpression> unique = ImmutableSet.builder();
+        extractExpressions(node, lookup).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression, types)));
+        return unique.build();
+    }
+
     public static Set<Symbol> extractUnique(Expression expression)
+    {
+        return ImmutableSet.copyOf(extractAll(expression));
+    }
+
+    public static Set<VariableReferenceExpression> extractUniqueVariable(Expression expression, TypeProvider types)
+    {
+        return ImmutableSet.copyOf(extractAllVariable(expression, types));
+    }
+
+    // TODO: return Set<VariableReferenceExpression>
+    public static Set<Symbol> extractUnique(RowExpression expression)
+    {
+        return ImmutableSet.copyOf(extractAll(expression).stream().map(variable -> new Symbol(variable.getName())).collect(toSet()));
+    }
+
+    public static Set<VariableReferenceExpression> extractUniqueVariable(RowExpression expression)
     {
         return ImmutableSet.copyOf(extractAll(expression));
     }
@@ -75,10 +115,33 @@ public final class SymbolsExtractor
         return unique.build();
     }
 
+    public static Set<VariableReferenceExpression> extractUniqueVariable(Iterable<? extends Expression> expressions, TypeProvider types)
+    {
+        ImmutableSet.Builder<VariableReferenceExpression> unique = ImmutableSet.builder();
+        for (Expression expression : expressions) {
+            unique.addAll(extractAllVariable(expression, types));
+        }
+        return unique.build();
+    }
+
     public static List<Symbol> extractAll(Expression expression)
     {
         ImmutableList.Builder<Symbol> builder = ImmutableList.builder();
         new SymbolBuilderVisitor().process(expression, builder);
+        return builder.build();
+    }
+
+    public static List<VariableReferenceExpression> extractAllVariable(Expression expression, TypeProvider types)
+    {
+        ImmutableList.Builder<VariableReferenceExpression> builder = ImmutableList.builder();
+        new VariableFromExpressionBuilderVisitor(types).process(expression, builder);
+        return builder.build();
+    }
+
+    public static List<VariableReferenceExpression> extractAll(RowExpression expression)
+    {
+        ImmutableList.Builder<VariableReferenceExpression> builder = ImmutableList.builder();
+        expression.accept(new VariableBuilderVisitor(), builder);
         return builder.build();
     }
 
@@ -90,6 +153,48 @@ public final class SymbolsExtractor
         return builder.build();
     }
 
+    public static Set<VariableReferenceExpression> extractOutputVariables(PlanNode planNode)
+    {
+        return extractOutputVariables(planNode, noLookup());
+    }
+
+    public static Set<VariableReferenceExpression> extractOutputVariables(PlanNode planNode, Lookup lookup)
+    {
+        return searchFrom(planNode, lookup)
+                .findAll()
+                .stream()
+                .flatMap(node -> node.getOutputVariables().stream())
+                .collect(toImmutableSet());
+    }
+
+    public static Set<VariableReferenceExpression> extractOutputVariables(PlanNode planNode, Lookup lookup, TypeProvider types)
+    {
+        return searchFrom(planNode, lookup)
+                .findAll()
+                .stream()
+                .flatMap(node -> node.getOutputVariables().stream())
+                .collect(toImmutableSet());
+    }
+
+    /**
+     * {@param expression} could be an OriginalExpression
+     */
+    private static Set<Symbol> extractUniqueInternal(RowExpression expression)
+    {
+        if (isExpression(expression)) {
+            return extractUnique(castToExpression(expression));
+        }
+        return extractUnique(expression);
+    }
+
+    private static Set<VariableReferenceExpression> extractUniqueVariableInternal(RowExpression expression, TypeProvider types)
+    {
+        if (isExpression(expression)) {
+            return extractUniqueVariable(castToExpression(expression), types);
+        }
+        return extractUniqueVariable(expression);
+    }
+
     private static class SymbolBuilderVisitor
             extends DefaultExpressionTraversalVisitor<Void, ImmutableList.Builder<Symbol>>
     {
@@ -97,6 +202,35 @@ public final class SymbolsExtractor
         protected Void visitSymbolReference(SymbolReference node, ImmutableList.Builder<Symbol> builder)
         {
             builder.add(Symbol.from(node));
+            return null;
+        }
+    }
+
+    private static class VariableFromExpressionBuilderVisitor
+            extends DefaultExpressionTraversalVisitor<Void, ImmutableList.Builder<VariableReferenceExpression>>
+    {
+        private final TypeProvider types;
+
+        protected VariableFromExpressionBuilderVisitor(TypeProvider types)
+        {
+            this.types = types;
+        }
+
+        @Override
+        protected Void visitSymbolReference(SymbolReference node, ImmutableList.Builder<VariableReferenceExpression> builder)
+        {
+            builder.add(new VariableReferenceExpression(node.getName(), types.get(Symbol.from(node))));
+            return null;
+        }
+    }
+
+    private static class VariableBuilderVisitor
+            extends DefaultRowExpressionTraversalVisitor<ImmutableList.Builder<VariableReferenceExpression>>
+    {
+        @Override
+        public Void visitVariableReference(VariableReferenceExpression variable, ImmutableList.Builder<VariableReferenceExpression> builder)
+        {
+            builder.add(variable);
             return null;
         }
     }
@@ -126,7 +260,7 @@ public final class SymbolsExtractor
         @Override
         protected Void visitIdentifier(Identifier node, ImmutableSet.Builder<QualifiedName> builder)
         {
-            builder.add(QualifiedName.of(node.getName()));
+            builder.add(QualifiedName.of(node.getValue()));
             return null;
         }
     }

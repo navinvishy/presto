@@ -15,13 +15,12 @@ package com.facebook.presto.rcfile;
 
 import com.facebook.presto.block.BlockEncodingManager;
 import com.facebook.presto.hadoop.HadoopNative;
-import com.facebook.presto.metadata.FunctionRegistry;
+import com.facebook.presto.metadata.FunctionManager;
 import com.facebook.presto.rcfile.binary.BinaryRcFileEncoding;
 import com.facebook.presto.rcfile.text.TextRcFileEncoding;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
 import com.facebook.presto.spi.type.ArrayType;
 import com.facebook.presto.spi.type.DecimalType;
 import com.facebook.presto.spi.type.Decimals;
@@ -38,7 +37,6 @@ import com.facebook.presto.spi.type.TypeSignatureParameter;
 import com.facebook.presto.spi.type.VarcharType;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.type.TypeRegistry;
-import com.google.common.base.Throwables;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -87,6 +85,7 @@ import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.io.compress.BZip2Codec;
 import org.apache.hadoop.io.compress.GzipCodec;
 import org.apache.hadoop.io.compress.Lz4Codec;
 import org.apache.hadoop.io.compress.SnappyCodec;
@@ -102,6 +101,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.math.BigInteger;
 import java.sql.Date;
 import java.sql.Timestamp;
@@ -123,6 +123,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static com.facebook.presto.rcfile.RcFileDecoderUtils.findFirstSyncPosition;
+import static com.facebook.presto.rcfile.RcFileTester.Compression.BZIP2;
 import static com.facebook.presto.rcfile.RcFileTester.Compression.LZ4;
 import static com.facebook.presto.rcfile.RcFileTester.Compression.NONE;
 import static com.facebook.presto.rcfile.RcFileTester.Compression.SNAPPY;
@@ -150,9 +151,10 @@ import static com.google.common.base.Functions.constant;
 import static com.google.common.collect.Iterables.transform;
 import static com.google.common.collect.Iterators.advance;
 import static com.google.common.io.Files.createTempDir;
+import static com.google.common.io.MoreFiles.deleteRecursively;
+import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.airlift.slice.SizeOf.SIZE_OF_INT;
 import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
-import static io.airlift.testing.FileUtils.deleteRecursively;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
@@ -187,14 +189,15 @@ import static org.testng.Assert.assertTrue;
 public class RcFileTester
 {
     private static final TypeManager TYPE_MANAGER = new TypeRegistry();
+
     static {
-        // associate TYPE_MANAGER with a function registry
-        new FunctionRegistry(TYPE_MANAGER, new BlockEncodingManager(TYPE_MANAGER), new FeaturesConfig());
+        // associate TYPE_MANAGER with a function manager
+        new FunctionManager(TYPE_MANAGER, new BlockEncodingManager(TYPE_MANAGER), new FeaturesConfig());
 
         HadoopNative.requireHadoopNative();
     }
 
-    public static final DateTimeZone HIVE_STORAGE_TIME_ZONE = DateTimeZone.forID("Asia/Katmandu");
+    public static final DateTimeZone HIVE_STORAGE_TIME_ZONE = DateTimeZone.forID("America/Bahia_Banderas");
 
     public enum Format
     {
@@ -227,7 +230,7 @@ public class RcFileTester
                     return columnarSerDe;
                 }
                 catch (SerDeException e) {
-                    throw Throwables.propagate(e);
+                    throw new RuntimeException(e);
                 }
             }
 
@@ -246,6 +249,13 @@ public class RcFileTester
 
     public enum Compression
     {
+        BZIP2 {
+            @Override
+            Optional<String> getCodecName()
+            {
+                return Optional.of(BZip2Codec.class.getName());
+            }
+        },
         ZLIB {
             @Override
             Optional<String> getCodecName()
@@ -318,7 +328,7 @@ public class RcFileTester
         // These compression algorithms were chosen to cover the three different
         // cases: uncompressed, aircompressor, and hadoop compression
         // We assume that the compression algorithms generally work
-        rcFileTester.compressions = ImmutableSet.of(NONE, LZ4, ZLIB);
+        rcFileTester.compressions = ImmutableSet.of(NONE, LZ4, ZLIB, BZIP2);
         return rcFileTester;
     }
 
@@ -342,7 +352,7 @@ public class RcFileTester
         if (complexStructuralTestsEnabled) {
             Iterable<Object> simpleStructs = transform(insertNullEvery(5, writeValues), RcFileTester::toHiveStruct);
             testRoundTripType(
-                    new RowType(ImmutableList.of(createRowType(type)), Optional.of(ImmutableList.of("field"))),
+                    RowType.from(ImmutableList.of(RowType.field("field", createRowType(type)))),
                     transform(simpleStructs, Collections::singletonList),
                     skipFormatsSet);
         }
@@ -577,7 +587,7 @@ public class RcFileTester
             slice.setBytes(0, in, slice.length());
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw new UncheckedIOException(e);
         }
 
         List<Long> syncPositionsBruteForce = new ArrayList<>();
@@ -657,7 +667,7 @@ public class RcFileTester
                 new DataSize(100, KILOBYTE),   // use a smaller size to create more row groups
                 new DataSize(200, KILOBYTE),
                 true);
-        BlockBuilder blockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), 1024);
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, 1024);
         while (values.hasNext()) {
             Object value = values.next();
             writeValue(type, blockBuilder, value);
@@ -851,7 +861,12 @@ public class RcFileTester
         }
         else if (actualValue instanceof TimestampWritable) {
             TimestampWritable timestamp = (TimestampWritable) actualValue;
-            actualValue = new SqlTimestamp((timestamp.getSeconds() * 1000) + (timestamp.getNanos() / 1000000L), UTC_KEY);
+            if (SESSION.isLegacyTimestamp()) {
+                actualValue = new SqlTimestamp((timestamp.getSeconds() * 1000) + (timestamp.getNanos() / 1000000L), UTC_KEY);
+            }
+            else {
+                actualValue = new SqlTimestamp((timestamp.getSeconds() * 1000) + (timestamp.getNanos() / 1000000L));
+            }
         }
         else if (actualValue instanceof StructObject) {
             StructObject structObject = (StructObject) actualValue;
@@ -986,7 +1001,7 @@ public class RcFileTester
         else if (type.getTypeSignature().getBase().equals(ROW)) {
             return getStandardStructObjectInspector(
                     type.getTypeSignature().getParameters().stream()
-                            .map(parameter -> parameter.getNamedTypeSignature().getName())
+                            .map(parameter -> parameter.getNamedTypeSignature().getName().get())
                             .collect(toList()),
                     type.getTypeParameters().stream()
                             .map(RcFileTester::getJavaObjectInspector)
@@ -1086,8 +1101,7 @@ public class RcFileTester
                 Text.class,
                 codecName.isPresent(),
                 createTableProperties("test", columnObjectInspector.getTypeName()),
-                () -> { }
-        );
+                () -> {});
     }
 
     private static SettableStructObjectInspector createSettableStructObjectInspector(String name, ObjectInspector objectInspector)
@@ -1125,9 +1139,10 @@ public class RcFileTester
 
         @Override
         public void close()
+                throws IOException
         {
             // hadoop creates crc files that must be deleted also, so just delete the whole directory
-            deleteRecursively(tempDir);
+            deleteRecursively(tempDir.toPath(), ALLOW_INSECURE);
         }
     }
 
@@ -1158,7 +1173,10 @@ public class RcFileTester
 
     private static RowType createRowType(Type type)
     {
-        return new RowType(ImmutableList.of(type, type, type), Optional.of(ImmutableList.of("a", "b", "c")));
+        return RowType.from(ImmutableList.of(
+                RowType.field("a", type),
+                RowType.field("b", type),
+                RowType.field("c", type)));
     }
 
     private static Object toHiveStruct(Object input)

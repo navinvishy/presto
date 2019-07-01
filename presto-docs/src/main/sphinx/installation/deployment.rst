@@ -106,6 +106,7 @@ The following is a minimal configuration for the coordinator:
     http-server.http.port=8080
     query.max-memory=50GB
     query.max-memory-per-node=1GB
+    query.max-total-memory-per-node=2GB
     discovery-server.enabled=true
     discovery.uri=http://example.net:8080
 
@@ -117,6 +118,7 @@ And this is a minimal configuration for the workers:
     http-server.http.port=8080
     query.max-memory=50GB
     query.max-memory-per-node=1GB
+    query.max-total-memory-per-node=2GB
     discovery.uri=http://example.net:8080
 
 Alternatively, if you are setting up a single machine for testing that
@@ -129,6 +131,7 @@ will function as both a coordinator and worker, use this configuration:
     http-server.http.port=8080
     query.max-memory=5GB
     query.max-memory-per-node=1GB
+    query.max-total-memory-per-node=2GB
     discovery-server.enabled=true
     discovery.uri=http://example.net:8080
 
@@ -153,7 +156,11 @@ These properties require some explanation:
   The maximum amount of distributed memory that a query may use.
 
 * ``query.max-memory-per-node``:
-  The maximum amount of memory that a query may use on any one machine.
+  The maximum amount of user memory that a query may use on any one machine.
+
+* ``query.max-total-memory-per-node``:
+  The maximum amount of user and system memory that a query may use on any one machine,
+  where system memory is the memory used during execution by readers, writers, and network buffers, etc.
 
 * ``discovery-server.enabled``:
   Presto uses the Discovery service to find all the nodes in the cluster.
@@ -172,12 +179,14 @@ These properties require some explanation:
 
 You may also wish to set the following properties:
 
-* ``query.queue-config-file``:
-  Specifies the file to read the :doc:`/admin/queue` from.
+* ``jmx.rmiregistry.port``:
+  Specifies the port for the JMX RMI registry. JMX clients should connect to this port.
 
 * ``jmx.rmiserver.port``:
   Specifies the port for the JMX RMI server. Presto exports many metrics
   that are useful for monitoring via JMX.
+
+See also :doc:`/admin/resource-groups`.
 
 Log Levels
 ^^^^^^^^^^

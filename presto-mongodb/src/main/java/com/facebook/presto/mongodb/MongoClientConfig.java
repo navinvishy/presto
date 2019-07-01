@@ -14,10 +14,11 @@
 package com.facebook.presto.mongodb;
 
 import com.google.common.base.Splitter;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.mongodb.MongoCredential;
 import com.mongodb.ServerAddress;
+import com.mongodb.Tag;
+import com.mongodb.TagSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.DefunctConfig;
 
@@ -37,23 +38,26 @@ public class MongoClientConfig
     private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
     private static final Splitter PORT_SPLITTER = Splitter.on(':').trimResults().omitEmptyStrings();
     private static final Splitter USER_SPLITTER = Splitter.onPattern("[:@]").trimResults().omitEmptyStrings();
+    private static final Splitter TAGSET_SPLITTER = Splitter.on('&').trimResults().omitEmptyStrings();
+    private static final Splitter TAG_SPLITTER = Splitter.on(':').trimResults().omitEmptyStrings();
 
     private String schemaCollection = "_schema";
     private List<ServerAddress> seeds = ImmutableList.of();
     private List<MongoCredential> credentials = ImmutableList.of();
 
-    private int minConnectionsPerHost = 0;
+    private int minConnectionsPerHost;
     private int connectionsPerHost = 100;
     private int maxWaitTime = 120_000;
     private int connectionTimeout = 10_000;
-    private int socketTimeout = 0;
-    private boolean socketKeepAlive = false;
-    private boolean sslEnabled = false;
+    private int socketTimeout;
+    private boolean socketKeepAlive;
+    private boolean sslEnabled;
 
     // query configurations
-    private int cursorBatchSize = 0; // use driver default
+    private int cursorBatchSize; // use driver default
 
     private ReadPreferenceType readPreference = ReadPreferenceType.PRIMARY;
+    private List<TagSet> readPreferenceTagSets = ImmutableList.of();
     private WriteConcernType writeConcern = WriteConcernType.ACKNOWLEDGED;
     private String requiredReplicaSetName;
     private String implicitRowFieldPrefix = "_pos";
@@ -117,16 +121,11 @@ public class MongoClientConfig
         for (String hostPort : hostPorts) {
             List<String> values = PORT_SPLITTER.splitToList(hostPort);
             checkArgument(values.size() == 1 || values.size() == 2, "Invalid ServerAddress format. Requires host[:port]");
-            try {
-                if (values.size() == 1) {
-                    builder.add(new ServerAddress(values.get(0)));
-                }
-                else {
-                    builder.add(new ServerAddress(values.get(0), Integer.parseInt(values.get(1))));
-                }
+            if (values.size() == 1) {
+                builder.add(new ServerAddress(values.get(0)));
             }
-            catch (NumberFormatException e) {
-                throw Throwables.propagate(e);
+            else {
+                builder.add(new ServerAddress(values.get(0), Integer.parseInt(values.get(1))));
             }
         }
         return builder.build();
@@ -230,6 +229,38 @@ public class MongoClientConfig
     {
         this.readPreference = readPreference;
         return this;
+    }
+
+    public List<TagSet> getReadPreferenceTags()
+    {
+        return readPreferenceTagSets;
+    }
+
+    @Config("mongodb.read-preference-tags")
+    public MongoClientConfig setReadPreferenceTags(String readPreferenceTags)
+    {
+        this.readPreferenceTagSets = buildTagSets(TAGSET_SPLITTER.split(readPreferenceTags));
+        return this;
+    }
+
+    private List<TagSet> buildTagSets(Iterable<String> tagSets)
+    {
+        ImmutableList.Builder<TagSet> builder = ImmutableList.builder();
+        for (String tagSet : tagSets) {
+            builder.add(new TagSet(buildTags(SPLITTER.split(tagSet))));
+        }
+        return builder.build();
+    }
+
+    private List<Tag> buildTags(Iterable<String> tags)
+    {
+        ImmutableList.Builder<Tag> builder = ImmutableList.builder();
+        for (String tag : tags) {
+            List<String> values = TAG_SPLITTER.splitToList(tag);
+            checkArgument(values.size() == 2, "Invalid Tag format. Requires tagName:tagValue");
+            builder.add(new Tag(values.get(0), values.get(1)));
+        }
+        return builder.build();
     }
 
     public WriteConcernType getWriteConcern()

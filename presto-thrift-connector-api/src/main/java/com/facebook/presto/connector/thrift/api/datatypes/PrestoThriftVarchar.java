@@ -13,21 +13,21 @@
  */
 package com.facebook.presto.connector.thrift.api.datatypes;
 
+import com.facebook.drift.annotations.ThriftConstructor;
+import com.facebook.drift.annotations.ThriftField;
+import com.facebook.drift.annotations.ThriftStruct;
 import com.facebook.presto.connector.thrift.api.PrestoThriftBlock;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.VarcharType;
-import com.facebook.swift.codec.ThriftConstructor;
-import com.facebook.swift.codec.ThriftField;
-import com.facebook.swift.codec.ThriftStruct;
 
 import javax.annotation.Nullable;
 
 import java.util.Objects;
 
+import static com.facebook.drift.annotations.ThriftField.Requiredness.OPTIONAL;
 import static com.facebook.presto.connector.thrift.api.PrestoThriftBlock.varcharData;
 import static com.facebook.presto.connector.thrift.api.datatypes.SliceData.fromSliceBasedBlock;
-import static com.facebook.swift.codec.ThriftField.Requiredness.OPTIONAL;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -35,7 +35,7 @@ import static com.google.common.base.Preconditions.checkArgument;
  * Elements of {@code nulls} array determine if a value for a corresponding row is null.
  * Each elements of {@code sizes} array contains the length in bytes for the corresponding element.
  * If row is null then the corresponding element in {@code sizes} is ignored.
- * {@code bytes} array contains uft8 encoded byte values.
+ * {@code bytes} array contains UTF-8 encoded byte values.
  * Values for all rows are written to {@code bytes} array one after another.
  * The total number of bytes must be equal to the sum of all sizes.
  */
